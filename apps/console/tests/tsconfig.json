@@ -1,0 +1,10 @@
+{
+  "//": "Separate tsconfig for the Playwright e2e tests + config, so `next build` (which uses the app tsconfig) does NOT type-check or bundle them, yet `pnpm typecheck` still covers them (second tsc invocation). Keeps the @playwright/test devDep out of the production build's scope.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["**/*.ts", "../playwright.config.ts"],
+  "exclude": ["node_modules"]
+}

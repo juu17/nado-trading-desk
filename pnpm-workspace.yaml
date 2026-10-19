@@ -1,0 +1,22 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+  - "tooling/*"
+# Build-script approvals (pnpm supply-chain policy). esbuild is required by vitest;
+# bufferutil/utf-8-validate are optional native speedups for ws and are not needed.
+allowBuilds:
+  esbuild: true
+  bufferutil: false
+  utf-8-validate: false
+# wative-core 2.6.0 is newer than the minimum-release-age window but is a required,
+# operator-chosen dependency.
+minimumReleaseAgeExclude:
+  - wative-core@2.6.0
+  - '@nadohq/client@0.58.0'
+  - '@nadohq/engine-client@0.58.0'
+  - '@nadohq/indexer-client@0.58.0'
+  - '@nadohq/mobile-client@0.58.0'
+  - '@nadohq/nuanze-client@0.58.0'
+  - '@nadohq/otc-client@0.58.0'
+  - '@nadohq/shared@0.58.0'
+  - '@nadohq/trigger-client@0.58.0'

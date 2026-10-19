@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+.turbo/
+*.log
+.DS_Store
+.claude/
+next-env.d.ts
+*.tsbuildinfo
+# Playwright (console e2e) — browsers come from the shared global toolchain store
+test-results/
+playwright-report/
+playwright/.cache/

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Redaction gate (pre-commit): block local paths / usernames / secrets from
+# entering committed source. Enable with: git config core.hooksPath .githooks
+# (the root `prepare` script does this automatically on `pnpm install`).
+node scripts/redaction-gate.mjs --staged --enforce || {
+  echo "commit blocked by the redaction gate — mask the finding or add an 'allow-pii' / 'allow-hardcoded-secret' comment." >&2
+  exit 1
+}

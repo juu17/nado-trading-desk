@@ -1,0 +1,41 @@
+{
+  "name": "console",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p ${PORT:-18270}",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p ${PORT:-18270}",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
+    "test:e2e": "playwright test",
+    "test:e2e:caps": "playwright test -c playwright.caps.config.ts"
+  },
+  "dependencies": {
+    "@cloudflare/kumo": "2.14.0",
+    "@farm/adapter-api": "workspace:*",
+    "@farm/adapter-nado": "workspace:*",
+    "@farm/core": "workspace:*",
+    "@farm/ui": "workspace:*",
+    "@nadohq/client": "0.58.0",
+    "@nadohq/engine-client": "0.58.0",
+    "@nadohq/indexer-client": "0.58.0",
+    "@phosphor-icons/react": "2.1.10",
+    "@tailwindcss/postcss": "4.3.3",
+    "@tanstack/react-virtual": "3.10.8",
+    "next": "15.5.28",
+    "qrcode.react": "4.2.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwindcss": "4.3.3",
+    "viem": "2.52.0",
+    "wative-core": "2.6.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.6.3"
+  }
+}

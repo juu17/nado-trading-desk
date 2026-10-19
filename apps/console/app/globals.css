@@ -1,0 +1,48 @@
+/* Kumo Quick Start — the exact setup and order from @cloudflare/kumo's README ("Import Styles") and
+   ai/USAGE.md ("CSS setup"): let Tailwind scan Kumo's compiled JS, register Kumo's styles (its @theme
+   tokens) BEFORE tailwindcss, then Tailwind itself. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "tailwindcss";
+
+/* Light-only (the owner abandoned dark mode): nothing to declare. Kumo's own kumo-binding.css pins
+   `:root { color-scheme: light }` and only goes dark under [data-mode="dark"], which we never set —
+   and the app carries zero dark-variant utilities (Kumo rule: theming is light-dark(), never the
+   Tailwind dark variant). */
+
+/* NETWORK-BOUND BRAND = Kumo's OWN brand tokens, re-pointed per network on the [data-net] attribute
+   (seeded on <html> server-side from the cookie in layout.tsx, kept live by NetworkProvider). Kumo's
+   primary Button (its emphasis vars are color-mix()es of var(--color-kumo-brand)), the Meter fill, the
+   Tabs underline indicator and every focus-visible:ring-kumo-brand repaint to the active network — how
+   an operator always knows which network they're on.
+   Kumo's primary Button forces white text, so each network hex is DERIVED darker with Kumo's own idiom
+   (its dark-mode brand is color-mix(in oklch, <brand>, black N%)) to Kumo's default ~4.5:1 contrast:
+   testnet #A1B3C1 → ≈#6c7982, mainnet #9772F7 → ≈#8362d7 (owner's choice).
+   Unlayered on purpose: beats Kumo's @layer theme / @layer base declarations. Attribute selector (not
+   :root[...]) so a subtree can pin a network — the "Switch to Mainnet" confirm renders inside
+   data-net="mainnet" while the app is still on testnet. :root falls back to testnet (DEFAULT_CHAIN_ID):
+   a missing attribute shows the SAFE network, never mainnet.
+   PRIORITY (owner rule): the two network accents outrank Kumo's default accent EVERYWHERE Kumo paints
+   an accent — brand fill + hover, brand text, and link text (Kumo's default link is blue-800). Kumo's
+   semantic status hues (info blue, success green, danger red) are not accents and stay Kumo's. */
+:root,
+[data-net="testnet"] {
+  --color-kumo-brand: color-mix(in oklch, #A1B3C1, black 25%);
+  --color-kumo-brand-hover: color-mix(in oklch, #A1B3C1, black 35%);
+  --text-color-kumo-brand: color-mix(in oklch, #A1B3C1, black 25%);
+  --text-color-kumo-link: color-mix(in oklch, #A1B3C1, black 35%);
+}
+[data-net="mainnet"] {
+  --color-kumo-brand: color-mix(in oklch, #9772F7, black 10%);
+  --color-kumo-brand-hover: color-mix(in oklch, #9772F7, black 20%);
+  --text-color-kumo-brand: color-mix(in oklch, #9772F7, black 10%);
+  --text-color-kumo-link: color-mix(in oklch, #9772F7, black 20%);
+}
+
+/* Segmented toggles = Kumo ButtonGroup + aria-pressed Buttons (primary = on, secondary = off).
+   ButtonGroup overlaps neighbours by 1px and later siblings paint on top, so an unpressed neighbour's
+   1px ring was drawn over the pressed button's inner edge — every segment except the last looked
+   broken when selected. Lift the pressed one (focus-visible stays above at Kumo's z-10). */
+[data-kumo-component="ButtonGroup"] > [aria-pressed="true"] {
+  z-index: 1;
+}
