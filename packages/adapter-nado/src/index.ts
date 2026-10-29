@@ -26,6 +26,8 @@ export type { NadoGateway, SubmitOrderResult, CancelResult } from "./gateway.js"
 export { createLiveNadoGateway } from "./live-gateway.js";
 export type { TransportLike, LimiterLike } from "./live-gateway.js";
 export type { LiveNadoGatewayDeps } from "./live-gateway.js";
+export { createMultiWalletNadoGateway } from "./multi-wallet-gateway.js";
+export type { MultiWalletNadoGateway, MultiWalletNadoGatewayDeps } from "./multi-wallet-gateway.js";
 export type { NadoOrderParams, NadoCancelParams, NadoWithdrawParams } from "./execute.js";
 export { validateOrder } from "./validate.js";
 export type { ValidatedOrder, OrderViolation, OrderViolationCode } from "./validate.js";
