@@ -117,6 +117,20 @@ describe("InMemoryOperationsStore", () => {
     expect((await s.read()).orders).toHaveLength(0);
   });
 
+  it("rejects reassigning a nested global field on the owner lane (guards the admit seam)", async () => {
+    const s = new InMemoryOperationsStore();
+    await expect(
+      s.updateOwner(A, (d) => {
+        d.experiments = [{ id: "sneaky" }]; // a reassignment the scalar guard would miss
+      }),
+    ).rejects.toThrow("OPERATIONS_GLOBAL_WRITE_ON_OWNER_LANE");
+    await expect(
+      s.updateOwner(A, (d) => {
+        d.groups = { [A]: "A" };
+      }),
+    ).rejects.toThrow("OPERATIONS_GLOBAL_WRITE_ON_OWNER_LANE");
+  });
+
   it("a global update observes writes committed before it (ordering teeth)", async () => {
     const s = new InMemoryOperationsStore();
     // Submit two owner writes, then a global update; the global snapshot must see both.
@@ -168,6 +182,17 @@ describe("IdbOperationsStore (fake-indexeddb)", () => {
     ]);
     const all = await s.read();
     expect(all.orders.map((o) => o.id).sort()).toEqual(["a1", "b1"]);
+  });
+
+  it("the hot-path global cache stays coherent with a global update", async () => {
+    const indexedDB = new IDBFactory();
+    const s = new IdbOperationsStore({ indexedDB, dbName: "test-desk-cache" });
+    // Prime the cache via an owner write, then change a global field via `update`.
+    await s.updateOwner(A, (d) => d.orders.push(order(A, "a1", "0x" + "a".repeat(64))));
+    await s.update((d) => { d.tradingStopped = false; d.epoch = 7; });
+    // A subsequent owner write must see the refreshed global (cache not stale).
+    const seen = await s.updateOwner(A, (d) => ({ stopped: d.tradingStopped, epoch: d.epoch }));
+    expect(seen).toEqual({ stopped: false, epoch: 7 });
   });
 
   it("a global update drops shards that went empty", async () => {

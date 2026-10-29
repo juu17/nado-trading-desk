@@ -125,20 +125,23 @@ export class InMemoryOperationsStore<
       // owner's shard here would race that owner's lane.
       if (view.orders.some((o) => o.owner.toLowerCase() !== key))
         refuse("OPERATIONS_SHARD_ESCAPE");
-      // Global-field writes belong on `update` (the global lane). Refuse a scalar
-      // global write LOUDLY rather than silently dropping it (shallow-share means it
-      // would otherwise vanish). Nested group/plan mutation is a documented no-go.
-      assertNoScalarGlobalWrite(view, this.global);
+      // Global-field writes belong on `update` (the global lane). Refuse one LOUDLY
+      // rather than silently dropping it (shallow-share means it would otherwise vanish).
+      assertNoGlobalWrite(view, this.global);
       this.shards.set(key, structuredClone(view.orders));
       return structuredClone(result);
     });
   }
 }
 
-// A per-owner lane must not mutate the shared global scalars; catch the common misuse
-// (flipping a flag / epoch / active plan) loudly. Nested groups/walletUsePlans/experiments
-// mutation is not cheaply detectable and is a documented contract violation.
-function assertNoScalarGlobalWrite<C extends ExperimentCampaignSlot>(
+// A per-owner lane must not write the shared global fields (those belong on the global
+// `update` lane). Catches scalar writes (flipping a flag / epoch / active plan) AND a
+// REASSIGNMENT of a nested global object (`s.groups = …`, `s.experiments = …`,
+// `s.walletUsePlans = …`) via an O(1) reference-identity check — the latter guards the
+// Phase-A `admit` hook, which runs on this lane with the full shared view and must stay
+// read-only on globals (an in-place DEEP mutation of a nested object, e.g.
+// `s.experiments[0].x = …`, is not cheaply detectable and remains a documented no-go).
+function assertNoGlobalWrite<C extends ExperimentCampaignSlot>(
   view: DeskOperations<C>,
   global: GlobalDoc<C>,
 ): void {
@@ -147,7 +150,10 @@ function assertNoScalarGlobalWrite<C extends ExperimentCampaignSlot>(
     view.tradingStopped !== global.tradingStopped ||
     view.stopped !== global.stopped ||
     view.epoch !== global.epoch ||
-    view.activeWalletUsePlanId !== global.activeWalletUsePlanId
+    view.activeWalletUsePlanId !== global.activeWalletUsePlanId ||
+    view.groups !== global.groups ||
+    view.walletUsePlans !== global.walletUsePlans ||
+    view.experiments !== global.experiments
   )
     refuse("OPERATIONS_GLOBAL_WRITE_ON_OWNER_LANE");
 }
@@ -181,6 +187,11 @@ export class IdbOperationsStore<
 {
   private dbPromise?: Promise<IDBDatabase>;
   private readonly lanes = new LaneLock();
+  // In-memory cache of the (orders-free) global doc. The per-owner HOT path reads it
+  // O(1) instead of deserializing the whole ~O(#wallets) global record on every order
+  // write. Single-process authority: the global lane (`update`) is the only writer of
+  // global fields and refreshes the cache on commit; a fresh instance loads it once.
+  private globalCache?: GlobalDoc<C>;
   constructor(
     private readonly opts: { indexedDB?: IDBFactory; dbName?: string } = {},
   ) {}
@@ -218,11 +229,19 @@ export class IdbOperationsStore<
     await reqToPromise(os.put(value, key));
   }
 
-  private async readGlobal(): Promise<GlobalDoc<C>> {
+  /** Load the global doc FRESH from IDB (a fresh, isolated object) — used by the
+   *  global lane, which mutates it before persisting. */
+  private async loadGlobalFresh(): Promise<GlobalDoc<C>> {
     const g = await this.getRaw<GlobalDoc<C>>(GLOBAL_KEY);
     if (g) return g;
     const { orders: _orders, ...rest } = emptyOperations<C>();
     return rest as GlobalDoc<C>;
+  }
+
+  /** The cached global doc (loaded once), for the read-only hot path. */
+  private async cachedGlobal(): Promise<GlobalDoc<C>> {
+    if (!this.globalCache) this.globalCache = await this.loadGlobalFresh();
+    return this.globalCache;
   }
 
   private async readShard(owner: string): Promise<ProtectedOrder[]> {
@@ -238,23 +257,34 @@ export class IdbOperationsStore<
       .filter((k) => k.startsWith("orders:"));
   }
 
-  async read(): Promise<DeskOperations<C>> {
-    const global = await this.readGlobal();
+  private async allOrders(): Promise<ProtectedOrder[]> {
     const keys = await this.listOwnerKeys();
     const orders: ProtectedOrder[] = [];
     for (const k of keys) {
       const list = (await this.getRaw<ProtectedOrder[]>(k)) ?? [];
       for (const o of list) orders.push(o);
     }
-    return { ...global, orders } as DeskOperations<C>;
+    return orders;
+  }
+
+  async read(): Promise<DeskOperations<C>> {
+    const global = await this.cachedGlobal();
+    const orders = await this.allOrders();
+    // Isolate the snapshot so a caller mutating it cannot corrupt the cache/shards.
+    return structuredClone({ ...global, orders } as DeskOperations<C>);
   }
 
   update<T>(fn: (state: DeskOperations<C>) => T): Promise<T> {
     return this.lanes.global(async () => {
-      const view = await this.read();
+      // The global lane mutates global fields, so read the global FRESH + isolated
+      // (not the shared cache). Exclusive w.r.t. owner lanes.
+      const global = await this.loadGlobalFresh();
+      const orders = await this.allOrders();
+      const view = { ...global, orders } as DeskOperations<C>;
       const result = fn(view);
-      const { global, shards } = splitShards(view);
-      await this.putRaw(GLOBAL_KEY, global);
+      const { global: nextGlobal, shards } = splitShards(view);
+      await this.putRaw(GLOBAL_KEY, nextGlobal);
+      this.globalCache = nextGlobal; // refresh the hot-path cache with the committed global
       // Rewrite every owner shard, and clear shards that went empty.
       const live = new Set<string>();
       for (const [owner, list] of shards) {
@@ -270,13 +300,15 @@ export class IdbOperationsStore<
   updateOwner<T>(owner: string, fn: (state: DeskOperations<C>) => T): Promise<T> {
     const key = owner.toLowerCase();
     return this.lanes.owner(key, async () => {
-      const global = await this.readGlobal();
+      // O(1) cached global (read-only here) + only this owner's shard — no O(#wallets)
+      // global deserialize per order write.
+      const global = await this.cachedGlobal();
       const own = await this.readShard(key);
       const view = { ...global, orders: own } as DeskOperations<C>;
       const result = fn(view);
       if (view.orders.some((o) => o.owner.toLowerCase() !== key))
         refuse("OPERATIONS_SHARD_ESCAPE");
-      assertNoScalarGlobalWrite(view, global);
+      assertNoGlobalWrite(view, global);
       await this.putRaw(ownerKey(key), view.orders);
       return structuredClone(result);
     });
