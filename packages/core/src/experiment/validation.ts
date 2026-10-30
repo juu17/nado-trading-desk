@@ -1,4 +1,4 @@
-import { FAST_SLOT_MS, LEGACY_SLOT_MS, roundTimingValid } from "./timing.js";
+import { FAST_SLOT_MS, LEGACY_SLOT_MS, TURBO_SLOT_MS, roundTimingValid } from "./timing.js";
 import { owner, rawAmount, refuse, type DeskOperations } from "../funding/types.js";
 import { FUNDING_ROUTE_TARGET, type ExperimentCampaign, type ExperimentCampaignInput } from "./types.js";
 import { validateRouteApproval } from "./route.js";
@@ -8,7 +8,14 @@ import { validateRehearsalPreset } from "./rehearsalPreset.js";
 
 /** Pairs one group may hold, and pairs that may trade at once (1.4.0): a group is up to five
  *  plan batches of 10 pairs run together (1.3.4 and before: one batch, 10 pairs). */
-export const EXPERIMENT_GROUP_MAX_PAIRS = 50;
+// Phase-A FREE concurrency dial (decision #5): lifted off the intern's 50 (= "1–5 batches ×
+// 10 pairs", a funding-rollover artifact) to cohort scale — a plan holds up to
+// WALLET_INVENTORY_MAX=5000 wallets = 2500 pairs. This caps BOTH a group's pair count and
+// maxConcurrency, so a single-group run can drive the whole cohort concurrently.
+// ⚠️ Before actually running thousands, Phase B must bound the coordinator's own per-tick
+// lane fan-out and de-O(n²) the whole-journal digest scans (density-audit findings); the
+// single-IP ceiling (decision #6) is the governing limit regardless.
+export const EXPERIMENT_GROUP_MAX_PAIRS = 2500;
 const product = (v: unknown) => Number.isSafeInteger(v) && Number(v) > 0;
 const id = (v: unknown) => typeof v === "string" && /^[A-Za-z0-9:_-]{1,80}$/.test(v);
 const time = (v: unknown) => Number.isSafeInteger(v) && Number(v) >= 0;
@@ -44,7 +51,7 @@ export function normalizeExperimentInput(input: ExperimentCampaignInput): Experi
     !Number.isSafeInteger(input.maxConcurrency ?? 1) || (input.maxConcurrency ?? 1) < 1 || (input.maxConcurrency ?? 1) > EXPERIMENT_GROUP_MAX_PAIRS ||
     (input.autoRoll !== undefined && typeof input.autoRoll !== "boolean") || (input.groups.length > 1 && !input.autoRoll) ||
     (input.makerTimeoutMs !== undefined && (!time(input.makerTimeoutMs) || input.makerTimeoutMs < 1000 || input.makerTimeoutMs > 300000)) ||
-    (input.slotMs !== undefined && input.slotMs !== FAST_SLOT_MS && input.slotMs !== LEGACY_SLOT_MS) ||
+    (input.slotMs !== undefined && input.slotMs !== FAST_SLOT_MS && input.slotMs !== LEGACY_SLOT_MS && input.slotMs !== TURBO_SLOT_MS) ||
     (input.closeMaker !== undefined && input.closeMaker !== "B") || (input.purpose !== undefined && input.purpose !== "REHEARSAL" && input.purpose !== "SCALED_TEST") ||
     (input.catchUpPercent !== undefined && (!Number.isSafeInteger(input.catchUpPercent) || input.catchUpPercent < 100 || input.catchUpPercent > 200 || !input.sizing)) ||
     (input.costGate !== undefined && !costGateOk(input.costGate)) ||
