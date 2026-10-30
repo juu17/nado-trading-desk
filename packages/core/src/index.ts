@@ -12,5 +12,6 @@ export * from "./alerting/index.js";
 export * from "./clocksync/index.js";
 export * from "./reconcile/index.js";
 export * from "./funding/index.js";
+export * from "./experiment/index.js";
 export * from "./driver/index.js";
 export { normalizeWativeError, categoryForTxStatus } from "./errors.js";
