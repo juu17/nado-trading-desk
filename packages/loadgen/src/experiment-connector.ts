@@ -156,6 +156,10 @@ export class NadoExperimentConnector implements ExperimentConnector {
   }
 
   async prepare(c: ExperimentCampaign, pair: ExperimentPair, request: ExperimentOrderRequest): Promise<PreparedExperimentOrder> {
+    // Single-source chainId: the EIP-712 domain is built with c.chainId but the signature is
+    // produced against deps.chainId (sign()); a divergence yields a valid-looking signature over
+    // the WRONG chain → silent rejection. Fail loud + unsent here (composition pre-audit #4).
+    if (c.chainId !== this.deps.chainId) throw new ExperimentUnsentOrderError("EXPERIMENT_CHAINID_MISMATCH");
     const productId = pairProductId(c, pair);
     const sizing = this.deps.sizingFor(productId);
     const gw = this.deps.forOwner(request.owner);

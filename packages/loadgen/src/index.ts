@@ -12,6 +12,7 @@
 export * from "./order-identity.js";
 export * from "./classify.js";
 export * from "./live-order-fill.js";
+export * from "./live-connector.js";
 export * from "./cohort-settle.js";
 export * from "./self-trade.js";
 export * from "./metrics.js";
