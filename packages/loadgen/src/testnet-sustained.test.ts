@@ -38,6 +38,7 @@ import { createLiveOrderFillSource } from "./live-order-fill.js";
 import { assembleLiveConnector, registerNadoWriteBuckets, canonicalOwner } from "./live-connector.js";
 import { createLiveEquitySource, decimalToX18 } from "./live-equity.js";
 import { GlobalNetLossStop, cohortEquityReader } from "./global-stop.js";
+import { StrayGuard, AbortGrace } from "./stray-guard.js";
 import { createLiveBenchmarkDriverDeps, buildLiveCampaignInput } from "./live-benchmark.js";
 import { BenchmarkDriver } from "./ramp.js";
 import { RunMetrics } from "./metrics.js";
@@ -69,6 +70,18 @@ const GLOBAL_STOP_INTERVAL_MS = Number(process.env.NADO_GLOBAL_STOP_INTERVAL_MS 
 // uncrossed, this long after placement (≈ 2× round-trip, ~400ms given the ~183ms fill-confirm
 // RTT seen on testnet). OFF by default; a real-funds run sets NADO_MAKER_CROSS_TIMEOUT_MS.
 const MAKER_CROSS_TIMEOUT_MS = process.env.NADO_MAKER_CROSS_TIMEOUT_MS ? Number(process.env.NADO_MAKER_CROSS_TIMEOUT_MS) : undefined;
+// Stray-fill circuit-breaker: the coordinator already flattens each stray reduce-only and
+// continues (earlyExitReason → A_CLOSE → B_CLOSE); this only bounds how MANY (count cap, primary)
+// or how EXPENSIVE (cumulative cost > half the global stop, the auto backstop) before halting the
+// run. OFF by default (testnet/offline); a real-funds run sets NADO_STRAY_STOP_COUNT.
+const STRAY_STOP_COUNT = process.env.NADO_STRAY_STOP_COUNT ? Number(process.env.NADO_STRAY_STOP_COUNT) : undefined;
+const STRAY_STOP_COST_X18 = process.env.NADO_STRAY_STOP_COST_X18 ? BigInt(process.env.NADO_STRAY_STOP_COST_X18)
+  : (GLOBAL_STOP_X18 !== undefined ? GLOBAL_STOP_X18 / 2n : undefined); // half the global stop
+// Transient-UNKNOWN abort grace: a dispatch/lookup/cancel UNKNOWN is transient (the coordinator
+// retries + the winding path re-polls it), so grant a bounded window for it to self-heal before
+// aborting — survives a stray's own flatten instead of a false instant abort (the ASTER case).
+// UNKNOWN=abort is preserved: grace only DELAYS, and a FATAL/REJECT is never graced.
+const UNKNOWN_GRACE_MS = Number(process.env.NADO_UNKNOWN_GRACE_MS ?? 3000);
 // Candidates = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them). Equity perps are
 // TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
 // (scripts/tradable-probe.mjs): FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. BTC(2)/WETH(3) excluded.
@@ -209,13 +222,35 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     results.baseline = { posA0, posB0, flatStart: posA0 === "0" && posB0 === "0" };
 
     let terminated: string | null = null;
-    const checkTerminating = (cs: readonly ExperimentCampaign[]) => {
+    // Stray circuit-breaker: scan completed rounds, count/cost flattened strays, trip on a cap.
+    const strayGuard = new StrayGuard({
+      stopCount: STRAY_STOP_COUNT, stopCostX18: STRAY_STOP_COST_X18,
+      onStray: (s, b) => say(`  [stray] ${s.kind} round=${s.roundId} cost=${s.costX18} (count ${b.strayCount}, cumCost ${b.cumulativeCostX18})`),
+      onTrip: (b) => { terminated ||= `STRAY_CIRCUIT_BREAKER: ${b.reason} cap exceeded (count ${b.strayCount}, cumCost ${b.cumulativeCostX18})`;
+        results.strayBreaker = { tripped: true, reason: b.reason, strayCount: b.strayCount, cumulativeCostX18: String(b.cumulativeCostX18) }; say(`  🚨 ${terminated}`); },
+    });
+    const abortGrace = new AbortGrace({ graceMs: UNKNOWN_GRACE_MS, now: Date.now });
+    // Terminate decision: a FATAL/REJECT pair-pause aborts at once; a transient UNKNOWN is given
+    // the bounded grace to self-heal; the stray breaker (above) aborts on a cap. The abort then
+    // flows to the finally's requestExit → reduce-only close → assertCohortFlatSettled (§5). This
+    // preserves UNKNOWN=abort — only CLASSIFIED strays resolve locally (in the coordinator), and
+    // the grace only delays an UNKNOWN abort to let a self-healing transient clear.
+    const assess = async (cs: readonly ExperimentCampaign[]) => {
       const c = cs[0]; if (!c) return;
+      await strayGuard.scan(c.groups.flatMap((g) => g.pairs.flatMap((p) => p.rounds)));
+      let fatal: string | undefined, unknown: string | undefined;
       for (const g of c.groups) for (const p of g.pairs) {
-        for (const r of p.rounds) for (const o of r.orders) if (o.state === "UNKNOWN" || o.cancelState === "UNKNOWN") terminated ||= `order UNKNOWN (round ${r.number}, ${o.role})`;
-        if (p.state === "PAUSED" && p.errorCode && /UNKNOWN|FATAL|REJECT/i.test(p.errorCode)) terminated ||= `pair PAUSED ${p.errorCode}`;
+        for (const r of p.rounds) for (const o of r.orders) if (o.state === "UNKNOWN" || o.cancelState === "UNKNOWN") unknown ||= `order UNKNOWN (round ${r.number}, ${o.role})`;
+        if (p.state === "PAUSED" && p.errorCode) {
+          if (/FATAL|REJECT/i.test(p.errorCode)) fatal ||= `pair PAUSED ${p.errorCode}`;
+          else if (/UNKNOWN/i.test(p.errorCode)) unknown ||= `pair PAUSED ${p.errorCode}`;
+        }
       }
+      if (fatal) terminated ||= fatal;
+      const graced = abortGrace.observe(unknown);
+      if (graced) terminated ||= `${graced} (persisted > ${UNKNOWN_GRACE_MS}ms)`;
     };
+    say(`  stray breaker: ${STRAY_STOP_COUNT !== undefined || STRAY_STOP_COST_X18 !== undefined ? `count>${STRAY_STOP_COUNT ?? "∞"} or cost>${STRAY_STOP_COST_X18 ?? "∞"} x18` : "OFF"} · unknown grace ${UNKNOWN_GRACE_MS}ms`);
 
     // Global net-loss stop: re-read cohort USDT0 equity each tick (throttled) and, if the drop
     // from the funded baseline reaches the stop, terminate the run → the finally's requestExit
@@ -234,7 +269,7 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
 
     const driver = new BenchmarkDriver(createLiveBenchmarkDriverDeps({
       store,
-      engine: { tick: async (id: string) => { const cs = await coordinator.tick(id); checkTerminating(cs); await globalStop.check(); if (terminated) throw new Error(`RUN_TERMINATED: ${terminated}`); return cs; }, query: (id: string) => coordinator.query(id) },
+      engine: { tick: async (id: string) => { const cs = await coordinator.tick(id); await assess(cs); await globalStop.check(); if (terminated) throw new Error(`RUN_TERMINATED: ${terminated}`); return cs; }, query: (id: string) => coordinator.query(id) },
       campaignId: campaign.id, tickMs: Math.max(1, Math.floor(TURBO_SLOT_MS / 20)), now: Date.now, sleep,
     }));
 
