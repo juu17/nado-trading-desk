@@ -99,6 +99,12 @@ const MAX_SPREAD_FRAC_OF_MID = process.env.NADO_MAX_SPREAD_FRAC_OF_MID ? Number(
 // clamped to still improve its near touch, so the self-cross taker crosses A — BUT only if the
 // spread is wider than the headroom, so the market selection requires spread >= HEADROOM + 1.
 const MAKER_HEADROOM = Math.max(1, Number(process.env.NADO_MAKER_HEADROOM_TICKS ?? 2));
+// MVP touch-fallback: if the spread is too tight to improve into a fresh empty tick, A joins the
+// near touch so its maker RESTS and B can take it (the A↔B fill; occasional stray flattened in
+// wind-down). ON for testnet by default, OFF for mainnet (which keeps the strict clean guarantee).
+const TOUCH_FALLBACK = process.env.NADO_TOUCH_FALLBACK !== undefined
+  ? (process.env.NADO_TOUCH_FALLBACK === "1" || process.env.NADO_TOUCH_FALLBACK === "true")
+  : !IS_MAINNET;
 const SPREAD_FLOOR = MAKER_HEADROOM + 1;
 
 const J = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x));
@@ -213,8 +219,10 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
       chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, gateway: loggedGateway, signers: [signerA, signerB],
       sizingFor: () => sizing, marketIdFor: () => marketId, clock: () => new ClockSync().now(),
       orderFill, equityFor, admit: assertExperimentOrderAdmission, store, makerHeadroomTicks: MAKER_HEADROOM,
+      touchFallback: TOUCH_FALLBACK,
     });
     say(`  deeper maker: headroom ${MAKER_HEADROOM} tick(s) from the opposite touch (post-only rests through a tighten)`);
+    say(`  touch-fallback: ${TOUCH_FALLBACK ? "ON (join the touch when too tight to improve → A rests, B takes)" : "OFF (strict empty-tick)"}`);
     // DIAGNOSTIC: surface swallowed per-pair lane errors (Promise.allSettled hides them) + events.
     let firstConnErr = "";
     const base = live.connector;

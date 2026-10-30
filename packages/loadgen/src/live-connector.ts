@@ -56,6 +56,8 @@ export interface LiveConnectorDeps {
   normaliseError?: DispatchErrorNormaliser;
   /** Post-only maker headroom (ticks from the opposite touch); see NadoExperimentConnectorDeps. */
   makerHeadroomTicks?: number;
+  /** MVP touch-fallback (testnet): join the near touch when there is no fresh empty tick; see NadoExperimentConnectorDeps. */
+  touchFallback?: boolean;
 }
 
 export interface LiveConnector {
@@ -105,6 +107,7 @@ export function assembleLiveConnector(deps: LiveConnectorDeps): LiveConnector {
     store: deps.store,
     normaliseError: deps.normaliseError,
     makerHeadroomTicks: deps.makerHeadroomTicks,
+    touchFallback: deps.touchFallback,
   });
 
   return { connector, owners, canonicalOwner };

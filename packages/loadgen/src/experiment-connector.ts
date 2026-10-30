@@ -99,6 +99,11 @@ export interface NadoExperimentConnectorDeps {
    *  resting external liquidity — this needs a spread wider than the headroom (the runner selects
    *  one). Defaults to 1 (the legacy best±1-tick placement). */
   makerHeadroomTicks?: number;
+  /** MVP touch-fallback: when the spread is too tight to improve into a fresh empty tick, post A's
+   *  maker AT the near touch (join) so it still RESTS and B can take it — instead of refusing
+   *  (EXPERIMENT_NO_EMPTY_TICK). A may share the touch queue (occasional stray, flattened in
+   *  wind-down). OFF by default → mainnet keeps the strict clean-self-cross guarantee. */
+  touchFallback?: boolean;
 }
 
 /** Best-effort raw→DispatchErrorInfo. The exact Nado error shape is confirmed at the testnet
@@ -218,16 +223,24 @@ export class NadoExperimentConnector implements ExperimentConnector {
         const bb = Number(bestBid ?? "0"), ba = Number(bestAsk ?? "0");
         if (!(bb > 0 && ba > 0 && tick > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID");
         const bbIdx = Math.round(bb / tick), baIdx = Math.round(ba / tick);
-        if (baIdx - bbIdx < 2) throw new ExperimentUnsentOrderError("EXPERIMENT_NO_EMPTY_TICK"); // no strictly-inside tick
         const occupied = new Set<number>([...book.bids, ...book.asks].map((l) => Math.round(Number(l.price) / tick)));
         const pref = Math.min(baIdx - 1, Math.max(bbIdx + 1, request.side === "BUY" ? baIdx - headroom : bbIdx + headroom));
         const inside = (i: number) => i > bbIdx && i < baIdx;
         let chosen: number | undefined;
-        for (let d = 0; d <= baIdx - bbIdx; d++) {
-          if (inside(pref - d) && !occupied.has(pref - d)) { chosen = pref - d; break; }         // prefer toward the near touch (safer on a tighten)
-          if (d > 0 && inside(pref + d) && !occupied.has(pref + d)) { chosen = pref + d; break; } // then deeper (more headroom)
+        if (baIdx - bbIdx >= 2) {                               // ≥1 strictly-inside tick exists → clean self-cross
+          for (let d = 0; d <= baIdx - bbIdx; d++) {
+            if (inside(pref - d) && !occupied.has(pref - d)) { chosen = pref - d; break; }         // prefer toward the near touch (safer on a tighten)
+            if (d > 0 && inside(pref + d) && !occupied.has(pref + d)) { chosen = pref + d; break; } // then deeper (more headroom)
+          }
         }
-        if (chosen === undefined) throw new ExperimentUnsentOrderError("EXPERIMENT_NO_EMPTY_TICK");
+        if (chosen === undefined) {
+          // No fresh empty tick (spread too tight, or every inside tick occupied). MVP touch-fallback:
+          // join the NEAR touch (BUY→best bid, SELL→best ask) so A's post-only maker still RESTS and B
+          // can take it — A may share the touch queue (occasional stray, flattened in wind-down).
+          // Without touchFallback this stays a hard refusal, so mainnet keeps the clean guarantee.
+          if (this.deps.touchFallback) chosen = request.side === "BUY" ? bbIdx : baIdx;
+          else throw new ExperimentUnsentOrderError("EXPERIMENT_NO_EMPTY_TICK");
+        }
         price = chosen * tick;
       } else if (postOnly) {
         // B's reduce-only CLOSE maker rests `headroom` ticks inside the opposite touch, clamped to
