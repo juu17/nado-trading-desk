@@ -1,0 +1,25 @@
+{
+  "name": "@farm/loadgen",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@farm/adapter-api": "workspace:*",
+    "@farm/adapter-nado": "workspace:*",
+    "@farm/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "vitest": "2.1.5",
+    "viem": "2.52.0"
+  }
+}
