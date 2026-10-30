@@ -37,6 +37,7 @@ import type { MarketId } from "@farm/adapter-api";
 import { createLiveOrderFillSource } from "./live-order-fill.js";
 import { assembleLiveConnector, registerNadoWriteBuckets, canonicalOwner } from "./live-connector.js";
 import { createLiveEquitySource, decimalToX18 } from "./live-equity.js";
+import { GlobalNetLossStop, cohortEquityReader } from "./global-stop.js";
 import { createLiveBenchmarkDriverDeps, buildLiveCampaignInput } from "./live-benchmark.js";
 import { BenchmarkDriver } from "./ramp.js";
 import { RunMetrics } from "./metrics.js";
@@ -59,6 +60,11 @@ const SUBACCT = "default";
 // file — provisioning mainnet custody is a later gate (M2), owned by the operator.
 const CRED_PATH = process.env.NADO_CREDENTIALS ?? join(homedir(), ".nado-ika-testnet", "credentials.json");
 const WINDOW_MS = Number(process.env.AB_WINDOW_MS ?? 150_000); // ~2.5 min; >=60s stable
+// Global net-loss stop (the "$25" hard backstop): the cohort-equity drop (x18) that halts +
+// flattens the run. OFF by default (testnet/offline), so a real-funds run sets NADO_GLOBAL_STOP_X18
+// (e.g. 25e18 = $25). The cohort equity is re-read at most every NADO_GLOBAL_STOP_INTERVAL_MS.
+const GLOBAL_STOP_X18 = process.env.NADO_GLOBAL_STOP_X18 ? BigInt(process.env.NADO_GLOBAL_STOP_X18) : undefined;
+const GLOBAL_STOP_INTERVAL_MS = Number(process.env.NADO_GLOBAL_STOP_INTERVAL_MS ?? 1000);
 // Candidates = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them). Equity perps are
 // TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
 // (scripts/tradable-probe.mjs): FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. BTC(2)/WETH(3) excluded.
@@ -206,9 +212,24 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
       }
     };
 
+    // Global net-loss stop: re-read cohort USDT0 equity each tick (throttled) and, if the drop
+    // from the funded baseline reaches the stop, terminate the run → the finally's requestExit
+    // closes open rounds reduce-only + asserts flat+settled (§5 abort). The ledger is never
+    // re-enabled afterwards. OFF unless NADO_GLOBAL_STOP_X18 is set.
+    const globalStop = new GlobalNetLossStop({
+      cohortEquityX18: cohortEquityReader([A, B], equityFor), stopX18: GLOBAL_STOP_X18,
+      minIntervalMs: GLOBAL_STOP_INTERVAL_MS, now: Date.now,
+      onStop: (info) => {
+        terminated ||= `GLOBAL_NET_LOSS_STOP: drop ${info.dropX18} >= stop ${info.stopX18} (baseline ${info.baselineX18} current ${info.currentX18})`;
+        results.globalStop = { tripped: true, dropX18: String(info.dropX18), stopX18: String(info.stopX18), baselineX18: String(info.baselineX18), currentX18: String(info.currentX18) };
+        say(`  🚨 ${terminated}`);
+      },
+    });
+    say(`  global net-loss stop: ${GLOBAL_STOP_X18 !== undefined ? `${GLOBAL_STOP_X18} x18 (checked every ${GLOBAL_STOP_INTERVAL_MS}ms)` : "OFF (NADO_GLOBAL_STOP_X18 unset)"}`);
+
     const driver = new BenchmarkDriver(createLiveBenchmarkDriverDeps({
       store,
-      engine: { tick: async (id: string) => { const cs = await coordinator.tick(id); checkTerminating(cs); if (terminated) throw new Error(`RUN_TERMINATED: ${terminated}`); return cs; }, query: (id: string) => coordinator.query(id) },
+      engine: { tick: async (id: string) => { const cs = await coordinator.tick(id); checkTerminating(cs); await globalStop.check(); if (terminated) throw new Error(`RUN_TERMINATED: ${terminated}`); return cs; }, query: (id: string) => coordinator.query(id) },
       campaignId: campaign.id, tickMs: Math.max(1, Math.floor(TURBO_SLOT_MS / 20)), now: Date.now, sleep,
     }));
 
