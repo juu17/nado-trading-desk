@@ -12,8 +12,16 @@ Untrusted code never touches real funds; the cohort is pre-funded out of band (s
 
 ## 1. Dispatch classification code table (`@farm/loadgen` `classify.ts`)
 The `classifyDispatch` policy maps sequencer/transport outcomes to deduped / not-sent /
-refused / rejected-fatal / unknown. The code sets are grounded in the dedup + WAF notes but
-must be confirmed against the LIVE sequencer:
+refused / rejected-fatal / unknown.
+
+**As built** — the raw→`DispatchErrorInfo` normaliser (`experiment-connector.ts`
+`defaultNormaliseError`) now reads the two concrete shapes the live stack throws: the sequencer
+refusal `AdapterError` (code at `raw.error_code`, which the skeleton missed → everything fell to
+`unknown`→halt) and the transport `httpError` (HTTP status at `raw.status`; any edge **403 →
+not-sent**). A code-tagged token is mined from free text ONLY for non-network errors (a relay-5xx
+body's "code: 2013" must not fabricate a phantom dedup); a numeric-string `code` is a 4-digit
+venue code or a 3-digit HTTP status by magnitude. The pure policy below is unchanged; the code
+SETS still must be confirmed against the LIVE sequencer:
 - [ ] **2013 DIGEST_ALREADY_EXISTS** → a byte-identical retry is absorbed as **placed** (the
       no-double-place guarantee). Confirm resubmitting the identical signed order returns 2013
       (not a second placement), and that `classify` → `deduped` leads to the existing order being
@@ -34,15 +42,46 @@ must be confirmed against the LIVE sequencer:
 
 ## 2. Authoritative per-order fill source (A-5 — IOC finality by position reconciliation)
 The coordinator's `ExperimentConnector.lookup` must return each order's TRUE cumulative fill,
-especially for the taker (B on open, A on close) that never rests. Confirm the live source:
-- [ ] The keyless **public `fill` stream** (the decided wake transport) and/or an
-      **order-by-digest** query give the authoritative per-order filled base qty. (Base
-      `getFills` returns `[]`; `@nadohq`'s per-order query API must be identified + mapped.)
-- [ ] **IOC finality is proven by position reconciliation** (cumulative confirmed fill vs a FRESH
-      engine position), NOT by a missing "cancelled" row. Confirm a partial IOC settles terminal
-      with the correct filled qty, and a fresh position read matches the summed fills.
-- [ ] The resting maker's fill while it rests (open-orders `filled`) matches what the cross then
+especially for the taker (B on open, A on close) that never rests.
+
+**As built (query/position-authoritative; the `fill` stream is the WAKE transport + per-fill
+feed, NOT the sole source of truth)** — `packages/loadgen/src/live-order-fill.ts`
+`createLiveOrderFillSource` over `packages/adapter-nado/src/fill-source.ts`:
+- **Resting maker** → engine `getOrder({productId,digest})` raw X18 `totalAmount`/`unfilledAmount`
+  (filled = |total|−|unfilled|); `resting` while `unfilled>0`.
+- **Taker (IOC) / fills** → the keyless **public `fill` stream** summed by digest in a pure
+  `FillAccumulator` with unit-correct math: base from the (original−remaining) progression,
+  `quoteX18 = Σ Δbase × price / 1e18`, fee summed then **clamped ≥ 0** (a maker rebate is zero
+  cost). Deduped + ordered by `submission_idx`.
+- **Terminality / reconciliation** → a gone order (`getOrder` → not-found) with confirmed fills
+  is terminal; a FRESH `getSubaccountSummary` net position is the reconciliation check.
+
+> 🔄 **Design divergence from the original brief (flag):** the brief recommended reading the
+> taker's `filledX18/quoteFilledX18/feePaidX18` directly from the `fill` WS stream. The A-5
+> pre-audit found that naive-WS-authoritative path carries a 1e18 quote-scale bug, a
+> non-monotonic-quote regression-pause, a maker-rebate negative-fee bug, and a missed-fill →
+> double-trade risk. So the WS stream is used as the WAKE + per-fill feed with **corrected
+> math**, and terminality/completeness leans on the engine + a position check — matching this
+> section's own "proven by position reconciliation" wording. An alternative authoritative source,
+> the **indexer `getMatchEvents`** (cumulative `cumulative_base_filled`/`_quote_filled` x18,
+> monotonic by construction, but `@nadohq/indexer-client` is not a current dep and no testnet
+> indexer endpoint is exported), should be evaluated at the gate; the fill reads are injectable
+> so the source is swappable without touching the connector.
+
+Confirm LIVE (the shape-dependent items the offline build is injected around):
+- [ ] **Pin the raw `fill` frame shape** with a short capture: that `filled_qty`/`remaining_qty`/
+      `original_qty`/`price`/`fee` are X18, and whether `filled_qty` is per-match-incremental or
+      cumulative (the accumulator derives base from original−remaining, robust to either; confirm).
+- [ ] **`getOrder` not-found shape** — the structured code/envelope that means "order left the
+      book", so `fill-source.isOrderNotFound` distinguishes it from a transport/WAF failure
+      (which must stay `unavailable` → not-observable, NEVER read as terminal).
+- [ ] **IOC finality by position reconciliation** — a partial IOC settles terminal with the
+      correct filled qty, and a fresh net position equals the summed confirmed fill (per wallet,
+      flat-start; this is the explicit A-5 gate, not inferred from a missing cancel row).
+- [ ] The resting maker's fill while it rests (`getOrder` filled) matches what the cross then
       consumes (no gap at the maker→terminal transition when B crosses it).
+- [ ] A gone order whose fill is not yet observed returns `undefined` → the coordinator's lag
+      window waits (NEVER `{filled:0, terminal:true}`, which would re-send a duplicate live order).
 
 ## 3. Self-cross mechanism (open + close)
 - [ ] On a thin/empty testnet book, A's post-only maker **rests** (is not auto-crossed) and B's
