@@ -12,3 +12,4 @@
 export * from "./order-identity.js";
 export * from "./classify.js";
 export * from "./cohort-settle.js";
+export * from "./self-trade.js";
