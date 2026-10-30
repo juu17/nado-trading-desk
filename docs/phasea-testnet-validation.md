@@ -10,6 +10,34 @@ trusted, and before the connector's live wiring is relied on.
 **Testnet only.** Mainnet stays gated behind explicit user authorization (decision #7).
 Untrusted code never touches real funds; the cohort is pre-funded out of band (seed script).
 
+## ✅ LIVE VALIDATION RESULT — PASS (Ink testnet, 2026-10-30)
+One N=1 A/B self-cross open+close ran live via `packages/loadgen/src/testnet-ab-round.test.ts`
+(`NADO_LIVE=1`), on **BTC-PERP** (the deterministic cross needs a >=2-tick spread; empty-book
+markets turned out to be trading-BLOCKED, code 2069). A = `0x01b3…D9d1`, B = `0x0451…02dA`.
+All 6 sections below passed. Key outcomes:
+- **Self-cross (open):** A post-only maker rested at bid+tick (77608, the unique top-of-book bid);
+  B's IOC SELL at 77608 crossed **only A**. Both legs filled **0.0013 BTC** at quote **100.8904
+  USDT0** (identical), A paid the **maker** fee 0.01009, B the **taker** fee 0.03531 (rates
+  0.0001 / 0.00035 — exact). Close mirrored (B reduce maker, A IOC) and net-zeroed to baseline.
+- **Fill-confirm latency:** ~183 ms (open), ~181 ms (close) — fills seen on the keyless WS.
+- **A-5 authoritative fill source:** confirmed both legs TERMINAL with correct base/quote/fee from
+  engine `getOrder` (maker) + the summed keyless `fill` stream, reconciled against a fresh
+  position (polled past the ~sub-second position lag behind the fill stream).
+- **Codes confirmed + folded into `classify.ts`:** 2008 post-only-would-cross, 2069
+  trading-blocked, 2020 order-not-found (all were previously unmapped → unknown→halt).
+- **§4 STP:** A and B are distinct per-wallet subaccounts; the intended A↔B cross filled on BOTH
+  open and close with **no operator/group STP cancelling it** → B-2 stays a Phase-B policy for
+  *unintended* cross-pair only.
+- **Raw `fill` frame (pinned):** `{ type:"fill", product_id, subaccount, order_digest,
+  filled_qty, remaining_qty, original_qty, price, is_taker, is_bid, fee, submission_idx }` — all
+  numeric fields X18 (e.g. price 77608e18); both subaccounts receive a frame per match sharing a
+  `submission_idx`. Matches the `FillAccumulator` mapping.
+- **Caveat:** the cohort wallets carry pre-existing inventory from earlier testing, so the round
+  was measured by **delta-to-baseline** (A +0.0013 then back; B −0.0013 then back) and the
+  absolute cohort flat-gate was n/a; on a genuinely flat-start cohort it runs the absolute gate.
+  A deterministic cross depends on catching a >=2-tick spread (live MM books are mostly 1-tick);
+  the runner polls for one. NO capacity ramp was run.
+
 ## 1. Dispatch classification code table (`@farm/loadgen` `classify.ts`)
 The `classifyDispatch` policy maps sequencer/transport outcomes to deduped / not-sent /
 refused / rejected-fatal / unknown.
