@@ -50,6 +50,8 @@ export interface LiveConnectorDeps {
   admit: OrderAdmission<ExperimentCampaign>;
   store: OperationsStore<ExperimentCampaign>;
   normaliseError?: DispatchErrorNormaliser;
+  /** Post-only maker headroom (ticks from the opposite touch); see NadoExperimentConnectorDeps. */
+  makerHeadroomTicks?: number;
 }
 
 export interface LiveConnector {
@@ -97,6 +99,7 @@ export function assembleLiveConnector(deps: LiveConnectorDeps): LiveConnector {
     admit: deps.admit,
     store: deps.store,
     normaliseError: deps.normaliseError,
+    makerHeadroomTicks: deps.makerHeadroomTicks,
   });
 
   return { connector, owners, canonicalOwner };

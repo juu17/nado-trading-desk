@@ -74,6 +74,13 @@ export interface NadoExperimentConnectorDeps {
   store: OperationsStore<ExperimentCampaign>;
   /** Raw→DispatchErrorInfo (testnet-verified). Defaults to a best-effort normaliser. */
   normaliseError?: DispatchErrorNormaliser;
+  /** Post-only maker depth: how many ticks of HEADROOM to leave from the OPPOSITE touch, so the
+   *  resting maker survives the book tightening a tick or two between the book-read and submit
+   *  (else post-only-would-cross, sequencer 2008). The maker is still clamped to improve its NEAR
+   *  touch (>= near±tick), so it is alone at the top and the self-cross taker crosses IT, not
+   *  resting external liquidity — this needs a spread wider than the headroom (the runner selects
+   *  one). Defaults to 1 (the legacy best±1-tick placement). */
+  makerHeadroomTicks?: number;
 }
 
 /** Best-effort raw→DispatchErrorInfo. The exact Nado error shape is confirmed at the testnet
@@ -177,15 +184,27 @@ export class NadoExperimentConnector implements ExperimentConnector {
       const tick = Number(sizing.tickSize) || 0;
       const tickDec = (sizing.tickSize.split(".")[1] || "").length; // tick's decimal places
       const slip = (request.slippageBps ?? c.slippageBps) / 10_000;
+      // Headroom clamp ≥ 1 (0 would price the maker AT the opposite touch → it crosses).
+      const headroom = Math.max(1, Math.floor(this.deps.makerHeadroomTicks ?? 1));
       let price: number;
-      if (postOnly) price = request.side === "BUY" ? (Number(bestBid ?? ref) + tick) : (Number(bestAsk ?? ref) - tick);
-      else price = request.side === "BUY" ? Number(bestAsk ?? ref) * (1 + slip) : Number(bestBid ?? ref) * (1 - slip);
+      if (postOnly) {
+        // Maker rests `headroom` ticks inside the OPPOSITE touch, so it survives the book
+        // tightening up to headroom-1 ticks between this read and submit (else 2008). Clamped to
+        // still improve its NEAR touch (≥ near±tick) so A is alone at the top and the self-cross
+        // taker crosses A, not resting external orders — and never at/through the opposite touch.
+        const bb = Number(bestBid ?? bestAsk ?? ref), ba = Number(bestAsk ?? bestBid ?? ref);
+        price = request.side === "BUY"
+          ? Math.min(ba - tick, Math.max(bb + tick, ba - headroom * tick))
+          : Math.max(bb + tick, Math.min(ba - tick, bb + headroom * tick));
+      } else price = request.side === "BUY" ? Number(bestAsk ?? ref) * (1 + slip) : Number(bestBid ?? ref) * (1 - slip);
       if (!(price > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID");
-      // Snap to the tick grid — BUY ceils, SELL floors, so a taker stays aggressive enough to
-      // cross and a maker stays passive — then format to the tick's decimals; otherwise the
-      // sequencer rejects the order 2000 "price not divisible by the price_increment" (the slip
-      // multiplier on the taker price lands off-grid). Confirmed live at the testnet gate.
-      if (tick > 0) { const ticks = request.side === "BUY" ? Math.ceil(price / tick) : Math.floor(price / tick); price = ticks * tick; }
+      // Snap to the tick grid, rounding so a TAKER stays aggressive enough to cross (BUY ceil /
+      // SELL floor) and a MAKER stays passive, away from crossing (BUY floor / SELL ceil); then
+      // format to the tick's decimals, else the sequencer rejects 2000 "price not divisible by
+      // the price_increment" (the slip multiplier on a taker price lands off-grid). The maker
+      // offset is already grid-aligned, so its snap is a float-safety no-op. Confirmed live.
+      if (tick > 0) { const up = (request.side === "BUY") !== postOnly; const ticks = up ? Math.ceil(price / tick) : Math.floor(price / tick); price = ticks * tick; }
+      if (!(price > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID"); // a tiny-price snap to 0 escapes the pre-snap guard
       const priceStr = tick > 0 ? price.toFixed(tickDec) : String(price);
       // size: an explicit base qty (a follow/close) stays; else notional → base at this price.
       const baseSize = request.quantityX18 !== undefined ? formatUnits(BigInt(request.quantityX18), 18)

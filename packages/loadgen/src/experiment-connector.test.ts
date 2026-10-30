@@ -24,10 +24,10 @@ const request = (over: Partial<ExperimentOrderRequest> = {}): ExperimentOrderReq
   ({ id: "experiment:c:p1:1:A_OPEN:1", role: "A_OPEN", owner: A, side: "BUY", postOnly: true, reduceOnly: false, ...over });
 
 type SubmitResult = { digest: string; status: string; raw: unknown };
-function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderFillSource } = {}) {
+function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderFillSource; book?: { bids: { price: string; size: string }[]; asks: { price: string; size: string }[] }; makerHeadroomTicks?: number } = {}) {
   let bookReads = 0;
   const gateway = {
-    async getOrderBook() { bookReads++; return { market: "nado:perp:BTC-PERP", bids: [{ price: "100", size: "10" }], asks: [{ price: "101", size: "10" }], ts: 0, raw: null } as never; },
+    async getOrderBook() { bookReads++; return { market: "nado:perp:BTC-PERP", bids: opts.book?.bids ?? [{ price: "100", size: "10" }], asks: opts.book?.asks ?? [{ price: "101", size: "10" }], ts: 0, raw: null } as never; },
     async submitOrder(signed: unknown) { return (opts.onSubmit ?? (() => ({ digest: "0x" + "d".repeat(64), status: "open", raw: {} })))(signed); },
     async cancelOrders() { return { cancelled: [], raw: {} }; },
     async getPositions() { return []; },
@@ -43,7 +43,7 @@ function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderF
     chainId: 763373, endpoint: address(99), forOwner: () => gateway, signerFor: () => signer,
     sizingFor: () => ({ tickSize: "1", stepSize: "0.001", minSize: "0.001", minNotional: "100" }),
     clock: () => 1_000_000_000_000, marketIdFor: () => "nado:perp:BTC-PERP", orderFill: fill,
-    admit: () => {}, store,
+    admit: () => {}, store, makerHeadroomTicks: opts.makerHeadroomTicks,
   });
   return { conn, store, gateway, get bookReads() { return bookReads; } };
 }
@@ -59,6 +59,26 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
     expect([retry.nonce, retry.expiration, retry.priceX18, retry.quantityX18]).toEqual([first.nonce, first.expiration, first.priceX18, first.quantityX18]);
     expect(first.postOnly).toBe(true);           // A_OPEN rests as a maker
     expect(/^0x[0-9a-f]{64}$/.test(first.digest)).toBe(true);
+  });
+
+  it("the deeper post-only maker rests inside the opposite touch with headroom, and still improves its near touch", async () => {
+    // Wide 10-tick book (bid 100 / ask 110, tick 1). A deeper maker (larger makerHeadroomTicks)
+    // rests further from the opposite touch so it survives a tighten, while staying inside the
+    // book so the self-cross taker crosses it, not resting external liquidity.
+    const book = { bids: [{ price: "100", size: "10" }], asks: [{ price: "110", size: "10" }] };
+    const c = campaign();
+    const buy = async (h: number) => (await makeDeps({ book, makerHeadroomTicks: h }).conn.prepare(c, pair(), request({ side: "BUY" }))).priceX18;
+    const sell = async (h: number) => (await makeDeps({ book, makerHeadroomTicks: h }).conn.prepare(c, pair(), request({ id: "experiment:c:p1:1:B_CLOSE:1", side: "SELL", postOnly: true, reduceOnly: true }))).priceX18;
+    const [b1, b3] = [await buy(1), await buy(3)];
+    const [s1, s3] = [await sell(1), await sell(3)];
+    // A deeper BUY maker sits LOWER (further below the ask = more headroom); a deeper SELL maker sits HIGHER.
+    expect(BigInt(b3)).toBeLessThan(BigInt(b1));
+    expect(BigInt(s3)).toBeGreaterThan(BigInt(s1));
+    // All rest strictly inside the 100/110 book — never at/through a touch (would cross → 2008).
+    const x18 = (p: number) => BigInt(p) * 10n ** 18n;
+    for (const p of [b1, b3, s1, s3]) { expect(BigInt(p)).toBeGreaterThan(x18(100)); expect(BigInt(p)).toBeLessThan(x18(110)); }
+    // Headroom 3 on a 10-tick spread: BUY rests 3 ticks below the ask (107); SELL 3 above the bid (103).
+    expect(BigInt(b3)).toBe(x18(107)); expect(BigInt(s3)).toBe(x18(103));
   });
 
   it("dispatch routes through the ledger and returns the digest on ACK", async () => {

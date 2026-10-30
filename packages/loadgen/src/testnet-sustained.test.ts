@@ -53,6 +53,12 @@ const WINDOW_MS = Number(process.env.AB_WINDOW_MS ?? 150_000); // ~2.5 min; >=60
 // TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
 // (scripts/tradable-probe.mjs): FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. BTC(2)/WETH(3) excluded.
 const CANDIDATES = (process.env.AB_PRODUCT_ID ? [Number(process.env.AB_PRODUCT_ID)] : [22, 48, 52, 76, 46, 86, 72]);
+// Deeper post-only maker: rest MAKER_HEADROOM ticks inside the opposite touch so it survives a
+// tick-or-two tighten between book-read and submit (the ~98% 2008 at best±1t). The maker is
+// clamped to still improve its near touch, so the self-cross taker crosses A — BUT only if the
+// spread is wider than the headroom, so the market selection requires spread >= HEADROOM + 1.
+const MAKER_HEADROOM = Math.max(1, Number(process.env.NADO_MAKER_HEADROOM_TICKS ?? 2));
+const SPREAD_FLOOR = MAKER_HEADROOM + 1;
 
 const J = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x));
 const fx = (v: unknown): number => (v == null ? NaN : typeof v === "object" && (v as { toFixed?: unknown }).toFixed ? Number((v as { toFixed: () => string }).toFixed()) : Number(v));
@@ -93,7 +99,7 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     // pick a FLAT wide-spread market (poll for a >=2-tick window)
     let PID = 0, symbol = "", tick = 0;
     for (let attempt = 0; attempt < Number(process.env.AB_SPREAD_ATTEMPTS ?? 45) && !PID; attempt++) {
-      let best = { spreadT: 1, pid: 0, tick: 0, symbol: "" };
+      let best = { spreadT: 0, pid: 0, tick: 0, symbol: "" };
       for (const pid of CANDIDATES) {
         const sy = symByPid.get(pid); if (!sy) continue;
         const t = fx(sy.priceIncrement);
@@ -102,11 +108,13 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
         const spreadT = (bb > 0 && ba > 0 && t > 0) ? Math.round((ba - bb) / t) : 0;
         if (spreadT > best.spreadT && ba > 0) best = { spreadT, pid, tick: t, symbol: sy.symbol };
       }
-      if (best.spreadT >= 2) { PID = best.pid; tick = best.tick; symbol = best.symbol; say(`  selected FLAT market pid=${PID} ${symbol} spread=${best.spreadT}t (attempt ${attempt + 1})`); break; }
-      if (attempt === 0) say(`  widest flat-market spread ${best.spreadT}t (<2) — polling for a >=2-tick window…`);
+      // Need a spread wider than the maker headroom (SPREAD_FLOOR = headroom + 1) so the deeper
+      // maker rests with headroom AND still improves its near touch for a clean A↔B self-cross.
+      if (best.spreadT >= SPREAD_FLOOR) { PID = best.pid; tick = best.tick; symbol = best.symbol; say(`  selected FLAT market pid=${PID} ${symbol} spread=${best.spreadT}t (need >=${SPREAD_FLOOR}t for headroom ${MAKER_HEADROOM}, attempt ${attempt + 1})`); break; }
+      if (attempt === 0) say(`  widest flat-market spread ${best.spreadT}t (<${SPREAD_FLOOR}) — polling for a >=${SPREAD_FLOOR}-tick window (maker headroom ${MAKER_HEADROOM})…`);
       await sleep(1800);
     }
-    if (!PID) throw new Error("no flat wide-spread (>=2 tick) candidate market appeared in the wait window");
+    if (!PID) throw new Error(`no flat market with spread >=${SPREAD_FLOOR} ticks (maker headroom ${MAKER_HEADROOM}+1) appeared in the wait window — this testnet book cannot rest a top-of-book self-cross maker (venue ceiling)`);
     const marketId = `nado:perp:${symbol}` as MarketId;
     const productIds = { [marketId]: PID } as Record<MarketId, number>;
     const sym = symByPid.get(PID)!;
@@ -145,8 +153,9 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     const live = assembleLiveConnector({
       chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, gateway: loggedGateway, signers: [signerA, signerB],
       sizingFor: () => sizing, marketIdFor: () => marketId, clock: () => new ClockSync().now(),
-      orderFill, admit: assertExperimentOrderAdmission, store,
+      orderFill, admit: assertExperimentOrderAdmission, store, makerHeadroomTicks: MAKER_HEADROOM,
     });
+    say(`  deeper maker: headroom ${MAKER_HEADROOM} tick(s) from the opposite touch (post-only rests through a tighten)`);
     // DIAGNOSTIC: surface swallowed per-pair lane errors (Promise.allSettled hides them) + events.
     let firstConnErr = "";
     const base = live.connector;
@@ -194,8 +203,23 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
       summary = level.summary;
       // the fills/sec timeseries (zero-filled quiet buckets → a post-knee stall is visible)
       const metrics = new RunMetrics();
-      for (const r of (await coordinator.query(campaign.id))[0]?.groups.flatMap((g) => g.pairs.flatMap((p) => p.rounds)) ?? []) if (r.orders.length > 0) metrics.addRound(r);
+      const allRounds = (await coordinator.query(campaign.id))[0]?.groups.flatMap((g) => g.pairs.flatMap((p) => p.rounds)) ?? [];
+      for (const r of allRounds) if (r.orders.length > 0) metrics.addRound(r);
       const series = metrics.fillsPerSecSeries(5000, { startMs, endMs: startMs + WINDOW_MS });
+      // Did the deeper maker RE-REST reliably now? maker-rest-rate = A_OPEN posts that did NOT get a
+      // post-only-would-cross refusal (2008) ÷ all A_OPEN posts. And did B cross A (self-cross) vs
+      // external MM liquidity? self-cross = a round where A's maker and B's taker both filled (the
+      // A↔B match); external = B filled but A's maker filled 0 (B swept outside liquidity).
+      const aOpens = allRounds.flatMap((r) => r.orders.filter((o) => o.role === "A_OPEN" && o.state !== "ABORTED_UNSENT"));
+      const aOpenRefused2008 = aOpens.filter((o) => o.errorCode === "ORDER_REFUSED_2008").length;
+      const makerRestRate = aOpens.length ? 1 - aOpenRefused2008 / aOpens.length : 0;
+      const bFilledRounds = allRounds.filter((r) => r.orders.some((o) => o.role === "B_OPEN" && BigInt(o.filledX18) > 0n));
+      const selfCrossRounds = bFilledRounds.filter((r) => r.orders.some((o) => o.role === "A_OPEN" && BigInt(o.filledX18) > 0n));
+      const selfCrossRate = bFilledRounds.length ? selfCrossRounds.length / bFilledRounds.length : 0;
+      const setAside = allRounds.filter((r) => r.earlyExitReason === "REPRICE_EXHAUSTED_EXIT").length;
+      results.quality = { aOpenPosts: aOpens.length, aOpenRefused2008, makerRestRate, roundsTotal: allRounds.length,
+        bFilledRounds: bFilledRounds.length, selfCrossRounds: selfCrossRounds.length, selfCrossRate, repriceSetAside: setAside };
+      say(`  QUALITY: maker-rest ${(makerRestRate * 100).toFixed(1)}% (${aOpens.length - aOpenRefused2008}/${aOpens.length} posts rested; ${aOpenRefused2008} refused 2008) · self-cross ${(selfCrossRate * 100).toFixed(1)}% (${selfCrossRounds.length}/${bFilledRounds.length} B-fills crossed A) · reprice-set-aside ${setAside} · rounds ${allRounds.length}`);
       results.run = {
         matchedFills: summary.matchedFills, filledLegs: summary.filledLegs, rounds: summary.rounds, hedgedRounds: summary.hedgedRounds,
         fillsPerSec: summary.fillsPerSec, windowed: summary.windowed, windowMs: summary.windowMs, spanMs: summary.spanMs,
