@@ -82,6 +82,9 @@ describe("createNadoFillReads — resting / not-found / unavailable discriminati
   it("a structured not-found rejection → not-found; a transport/WAF failure → unavailable (never 'gone')", async () => {
     const notFound = createNadoFillReads({ engine: makeEngine({ getOrder: async () => { throw new Error("order not found"); } }), accumulator: new FillAccumulator() });
     expect(await notFound.restingOrder("0xA", 2, "0xdig")).toEqual({ kind: "not-found" });
+    // the LIVE shape (2026-10-30): EngineServerFailureError, message begins "2020: …could not be found"
+    const live2020 = createNadoFillReads({ engine: makeEngine({ getOrder: async () => { throw new Error("2020: Order with the provided digest could not be found. Please verify the order digest and try again."); } }), accumulator: new FillAccumulator() });
+    expect(await live2020.restingOrder("0xA", 2, "0xdig")).toEqual({ kind: "not-found" });
     const waf = createNadoFillReads({ engine: makeEngine({ getOrder: async () => { throw Object.assign(new Error("HTTP 403"), { code: "403" }); } }), accumulator: new FillAccumulator() });
     expect(await waf.restingOrder("0xA", 2, "0xdig")).toEqual({ kind: "unavailable" });
     const reset = createNadoFillReads({ engine: makeEngine({ getOrder: async () => { throw new Error("socket ECONNRESET"); } }), accumulator: new FillAccumulator() });

@@ -28,7 +28,7 @@ export type { TransportLike, LimiterLike } from "./live-gateway.js";
 export type { LiveNadoGatewayDeps } from "./live-gateway.js";
 export { createMultiWalletNadoGateway } from "./multi-wallet-gateway.js";
 export type { MultiWalletNadoGateway, MultiWalletNadoGatewayDeps } from "./multi-wallet-gateway.js";
-export { FillAccumulator, createNadoFillReads, subscribeFills } from "./fill-source.js";
+export { FillAccumulator, createNadoFillReads, subscribeFills, ENGINE_ORDER_NOT_FOUND_CODE } from "./fill-source.js";
 export type {
   NadoFillFrame, CumulativeFill, RestingOrderResult, NadoFillReads, NadoFillReadsDeps,
   EngineOrderQueryLike, SocketLike, SubscribeFillsOpts,

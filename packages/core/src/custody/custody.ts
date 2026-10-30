@@ -23,6 +23,16 @@ export class Custody {
     return this.ws.accounts.create(name, password, mnemonic);
   }
 
+  /** The first HD cohort of an ALREADY-provisioned workspace (unlocked). Use this to load a
+   *  cohort created out of band (e.g. the disposable testnet wallet workspace) and sign with its
+   *  already-derived wallets, rather than createCohort which makes a fresh one. */
+  async firstCohort(password: string): Promise<Account> {
+    const acc = this.ws.accounts[0];
+    if (!acc) throw new Error("no cohort in workspace");
+    await acc.tryUnlock(password);
+    return acc;
+  }
+
   /**
    * The raw wative `EvmSigner` for one wallet — used INTERNALLY by core/chain +
    * core/plan for on-chain work (`Contract.call`, `buildTransaction`,

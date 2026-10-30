@@ -157,12 +157,26 @@ export interface NadoFillReadsDeps {
   isOrderNotFound?: (error: unknown) => boolean;
 }
 
+/** Nado engine error code for "order with the provided digest could not be found" — the
+ *  authoritative "gone from the book" signal (confirmed live 2026-10-30: thrown as an
+ *  EngineServerFailureError whose message begins "2020: …could not be found", with NO
+ *  structured code field). */
+export const ENGINE_ORDER_NOT_FOUND_CODE = 2020;
+
+/** Parse a leading "<code>: …" from an engine error message (how @nadohq EngineServerFailureError
+ *  carries the code — there is no structured field). */
+const leadingEngineCode = (msg: string): number | undefined => {
+  const m = /^\s*(\d{3,4})\s*:/.exec(msg);
+  return m ? Number(m[1]) : undefined;
+};
+
 const defaultIsOrderNotFound = (error: unknown): boolean => {
   const e = (error ?? {}) as { message?: unknown };
   const msg = typeof e.message === "string" ? e.message : "";
-  // Best-effort until pinned live (docs/phasea-testnet-validation.md §2): an explicit
-  // not-found-ish message only — NEVER infer "gone" from a transport/WAF/timeout failure.
-  return /not[\s_-]?found|no such order|unknown order|does not exist/i.test(msg);
+  // The authoritative signal is engine code 2020 (leading "2020:" in the message). Also accept an
+  // explicit not-found phrase as a fallback. NEVER infer "gone" from a transport/WAF/timeout.
+  return leadingEngineCode(msg) === ENGINE_ORDER_NOT_FOUND_CODE
+    || /not[\s_-]?found|no such order|unknown order|could not be found|does not exist/i.test(msg);
 };
 
 export function createNadoFillReads(deps: NadoFillReadsDeps): NadoFillReads {
