@@ -194,7 +194,13 @@ export class NadoExperimentConnector implements ExperimentConnector {
   async lookup(_c: ExperimentCampaign, order: ExperimentOrder): Promise<ExperimentOrderFact> {
     const observedAt = this.deps.clock();
     const fill = await this.deps.orderFill(order.owner, order.productId, order.digest);
-    if (!fill) return { digest: order.digest, identityMatches: false, known: false, terminal: false, filledX18: "0", quoteFilledX18: null, feePaidX18: null, observedAt };
+    // A looked-up order is one WE dispatched, keyed by its own digest, so identity always
+    // matches. `undefined` means the fill is not observable YET (pre-subscription / pre-index
+    // lag) — report identityMatches:true, known:false so the coordinator's `lagging()` window
+    // waits it out, rather than identityMatches:false which trips an immediate LOOKUP_UNKNOWN
+    // pause (A-5 pre-audit #5). A genuine never-observed order still pauses once the lag window
+    // elapses — safe, and never a double-place.
+    if (!fill) return { digest: order.digest, identityMatches: true, known: false, terminal: false, filledX18: "0", quoteFilledX18: null, feePaidX18: null, observedAt };
     return {
       digest: order.digest, identityMatches: true, known: true, terminal: fill.terminal,
       filledX18: fill.filledX18, quoteFilledX18: fill.quoteFilledX18, feePaidX18: fill.feePaidX18, observedAt,

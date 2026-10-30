@@ -11,6 +11,7 @@
 // validated at the testnet gate, where the live Nado read API + WAF behaviour are confirmed.
 export * from "./order-identity.js";
 export * from "./classify.js";
+export * from "./live-order-fill.js";
 export * from "./cohort-settle.js";
 export * from "./self-trade.js";
 export * from "./metrics.js";
