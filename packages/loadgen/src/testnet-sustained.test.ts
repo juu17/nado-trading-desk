@@ -65,6 +65,10 @@ const WINDOW_MS = Number(process.env.AB_WINDOW_MS ?? 150_000); // ~2.5 min; >=60
 // (e.g. 25e18 = $25). The cohort equity is re-read at most every NADO_GLOBAL_STOP_INTERVAL_MS.
 const GLOBAL_STOP_X18 = process.env.NADO_GLOBAL_STOP_X18 ? BigInt(process.env.NADO_GLOBAL_STOP_X18) : undefined;
 const GLOBAL_STOP_INTERVAL_MS = Number(process.env.NADO_GLOBAL_STOP_INTERVAL_MS ?? 1000);
+// Self-cross cancel-on-timeout (ms): bail a round reduce-only if A's maker is still resting,
+// uncrossed, this long after placement (≈ 2× round-trip, ~400ms given the ~183ms fill-confirm
+// RTT seen on testnet). OFF by default; a real-funds run sets NADO_MAKER_CROSS_TIMEOUT_MS.
+const MAKER_CROSS_TIMEOUT_MS = process.env.NADO_MAKER_CROSS_TIMEOUT_MS ? Number(process.env.NADO_MAKER_CROSS_TIMEOUT_MS) : undefined;
 // Candidates = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them). Equity perps are
 // TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
 // (scripts/tradable-probe.mjs): FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. BTC(2)/WETH(3) excluded.
@@ -195,8 +199,9 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     } as unknown as typeof base;
     const coordinator = new ExperimentCoordinator(store, dbg, { now: Date.now, random: Math.random, chain: true,
       onEvent: (e: { level: string; event: string; data?: unknown }) => { if (e.level !== "info" || /start|order_send|set_aside|flatten/.test(e.event)) say(`  [evt] ${e.level} ${e.event}${e.data ? " " + J(e.data).slice(0, 140) : ""}`); } });
-    const campaign = buildLiveCampaignInput({ chainId: CHAIN_ID, productId: PID, a: A, b: B, orderNotionalX18, slotMs: TURBO_SLOT_MS, maxConcurrency: 1 });
+    const campaign = buildLiveCampaignInput({ chainId: CHAIN_ID, productId: PID, a: A, b: B, orderNotionalX18, slotMs: TURBO_SLOT_MS, maxConcurrency: 1, makerCrossTimeoutMs: MAKER_CROSS_TIMEOUT_MS });
     say(`  min-notional sizing: orderNotional=${orderNotionalX18} x18 (live minNotional ${sizing.minNotional} USDT0)`);
+    say(`  cancel-on-timeout: ${MAKER_CROSS_TIMEOUT_MS !== undefined ? `${MAKER_CROSS_TIMEOUT_MS}ms (A's maker bailed if uncrossed)` : "OFF (bounded by slot follow deadline)"}`);
 
     // baselines (expect flat on a non-BTC/WETH market)
     const posA0 = await reads.netPositionX18(A, PID), posB0 = await reads.netPositionX18(B, PID);

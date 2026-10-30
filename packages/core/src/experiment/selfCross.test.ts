@@ -174,6 +174,47 @@ describe("self-cross failure paths close cleanly (no stall, no stranded maker)",
     expect(round.orders.every((o) => o.state === "TERMINAL" || o.state === "ABORTED_UNSENT")).toBe(true);
   });
 
+  it("cancel-on-timeout: A's maker bailed reduce-only when B has not crossed it within makerCrossTimeoutMs", async () => {
+    // B sweeps external liquidity (A left resting). With a SHORT cross timeout (500ms) and the
+    // TURBO slot's follow deadline at 1000ms, the round must bail at the timeout — bounding A's
+    // stranger-exposure BEFORE the slot deadline — and close flat reduce-only.
+    const x = selfCrossFixture({ externalLiquidity: true });
+    x.config.makerCrossTimeoutMs = 500;
+    await x.init();
+    const round = async () => (await x.current()).groups[0]!.pairs[0]!.rounds[0];
+    // Drive to B_OPEN with A still resting; now=0 < 500 < 1000, so the round HOLDS (no bail yet).
+    for (let i = 0; i < 20 && (await round())?.state !== "B_OPEN"; i++) await x.step(1);
+    expect((await round())?.state).toBe("B_OPEN");
+    expect((await round())?.earlyExitReason).toBeUndefined(); // not bailed yet (now=0)
+    // Advance to exactly the cross timeout — still below the 1000ms follow deadline — and step.
+    x.now = 500;
+    await x.step(1);
+    expect((await round())?.earlyExitReason).toBe("FOLLOW_TIMEOUT_EXIT"); // the SHORT timeout fired
+    // Finish the reduce-only close; the pair ends flat with A's maker withdrawn.
+    for (let i = 0; i < 40 && (await round())?.state !== "COMPLETED"; i++) { await x.step(1); x.now += 50; }
+    const r = (await round())!;
+    expect(r.state).toBe("COMPLETED");
+    expect(x.positions.get(address(1)) ?? 0n).toBe(0n);
+    expect(x.positions.get(address(2)) ?? 0n).toBe(0n);
+    const aOpen = r.orders.find((o) => o.role === "A_OPEN")!;
+    expect(["TERMINAL", "ABORTED_UNSENT"]).toContain(aOpen.state); // A's resting maker withdrawn, not left exposed
+    expect(r.orders.every((o) => o.state === "TERMINAL" || o.state === "ABORTED_UNSENT")).toBe(true);
+  });
+
+  it("cancel-on-timeout does NOT fire on the happy path (B crosses A within the timeout)", async () => {
+    const x = selfCrossFixture(); // no external liquidity → B crosses A cleanly, A reconciles terminal
+    x.config.makerCrossTimeoutMs = 500;
+    await x.init();
+    const round = async () => (await x.current()).groups[0]!.pairs[0]!.rounds[0];
+    for (let i = 0; i < 40 && (await round())?.state !== "COMPLETED"; i++) await x.step(1);
+    const r = (await round())!;
+    expect(r.state).toBe("COMPLETED");
+    expect(r.earlyExitReason).toBeUndefined(); // clean full cross, no timeout bail
+    expect(x.positions.get(address(1)) ?? 0n).toBe(0n);
+    expect(x.positions.get(address(2)) ?? 0n).toBe(0n);
+    expect(BigInt(r.orders.find((o) => o.role === "A_OPEN")!.filledX18)).toBeGreaterThan(0n); // A filled by B's cross
+  });
+
   it("B's post-only close maker refused (2008) falls to the taker close and still flattens B, no hang", async () => {
     // closeMaker:"B" posts a SECOND post-only maker every round (decision #2's mirror). Under a
     // moving book it can be refused post-only-would-cross just like A's open. The refusal must

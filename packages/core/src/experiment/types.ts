@@ -40,6 +40,12 @@ export interface ExperimentCampaignInput {
   fundingReadiness?: ExperimentFundingReadiness;
   slippageBps: number;
   makerTimeoutMs?: number;
+  /** Self-cross only (real-funds guardrail): a SHORT cross timeout (≈ 2× expected round-trip).
+   *  If A's post-only open maker is still resting (not crossed by B) this many ms after it was
+   *  placed, the round bails reduce-only (A_CLOSE withdraws A's maker, both legs close to flat)
+   *  rather than leave A exposed to external takers. Absent = off (bounded only by the slot's
+   *  follow deadline, as before). Tighter than makerTimeoutMs, which governs maker re-post. */
+  makerCrossTimeoutMs?: number;
   /** Round slot length for this task: 180000 (3 minutes, the default for tasks made since
    *  1.3.4) or 300000; absent: 5 minutes (tasks made before). See timing.ts. */
   slotMs?: number;

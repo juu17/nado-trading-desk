@@ -1166,6 +1166,18 @@ export class ExperimentCoordinator {
         // Organic: B follows A's confirmed EXTERNAL fill (A already TERMINAL). Self-cross: A is
         // still RESTING (DISPATCHED) and B crosses it now; A is made terminal from the cross below.
         if (c.selfCross ? (!(a.state === "DISPATCHED" || a.state === "TERMINAL") || (a.state === "DISPATCHED" && !!a.cancelState)) : (a.state !== "TERMINAL" || !a.factKnown)) refuse("EXPERIMENT_SOURCE_NOT_FINAL");
+        // [self-cross] Cancel-on-timeout — bound A's stranger-exposure window on every round. If
+        // A's open maker is STILL resting (DISPATCHED, not crossed by B) past the short cross
+        // timeout (≈ 2× round-trip), B did not cross it in time (slow / swept external / book
+        // moved): bail the round reduce-only — A_CLOSE withdraws A's resting maker and both legs
+        // close to flat — rather than leave A exposed. Off unless makerCrossTimeoutMs is set; when
+        // set it fires BEFORE the slot's followDeadline, tightening the exposure bound. The happy
+        // path (B crosses A → A reconciled TERMINAL) never reaches this (requires A still resting).
+        if (c.selfCross && c.makerCrossTimeoutMs !== undefined && a.state === "DISPATCHED" && !a.cancelState && this.now() - a.createdAt >= c.makerCrossTimeoutMs) {
+          await this.change(c.id, current => { if (!this.active(current, t)) return;
+            const round = pairById(current, p.id)!.rounds.find(round => round.id === r!.id)!; round.earlyExitReason = "FOLLOW_TIMEOUT_EXIT"; round.state = "A_CLOSE"; });
+          return;
+        }
         // B follows A's actual base quantity. A partial or missed IOC (price moved past the
         // slippage bound, thin book) is followed again for the exact remainder at a fresh
         // price; after FOLLOW_ATTEMPTS the round closes both real positions instead of

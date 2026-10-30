@@ -72,6 +72,10 @@ export interface LiveCampaignOpts {
    *  a wallet that loses this much vs its flat baseline (recordStats → EXPERIMENT_COST_LIMIT_EXIT).
    *  Absent = off (the testnet/offline default). Pair with an injected live equityFor. */
   maxLossPerWalletX18?: string;
+  /** Self-cross cancel-on-timeout (ms): bail a round reduce-only if A's maker is still resting,
+   *  uncrossed, this long after placement (≈ 2× round-trip). Absent = off (bounded only by the
+   *  slot's follow deadline). Set for a real-funds run to bound stranger exposure every round. */
+  makerCrossTimeoutMs?: number;
 }
 
 /** The locked single-pair self-cross benchmark campaign (decisions #2/#4/#5): selfCross,
@@ -90,6 +94,7 @@ export function buildLiveCampaignInput(opts: LiveCampaignOpts): ExperimentCampai
     closeMaker: "B",
     maxConcurrency: opts.maxConcurrency ?? 1,
     ...(opts.maxLossPerWalletX18 !== undefined ? { maxLossPerWalletX18: opts.maxLossPerWalletX18 } : {}),
+    ...(opts.makerCrossTimeoutMs !== undefined ? { makerCrossTimeoutMs: opts.makerCrossTimeoutMs } : {}),
     groups: [{ id: "g1", pairs: [{ id: "p0", a: opts.a, b: opts.b }] }],
   } as ExperimentCampaignInput;
 }
