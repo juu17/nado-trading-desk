@@ -68,6 +68,10 @@ export interface LiveCampaignOpts {
   /** Effectively uncapped so the pair keeps cycling rounds for the whole measurement window. */
   targetNotionalPerWalletX18?: string;
   side?: ExperimentSide;       // omitted → the coordinator draws BUY/SELL per round
+  /** Per-wallet loss cap (x18). Set for a real-funds run so the coordinator auto-exits (flattens)
+   *  a wallet that loses this much vs its flat baseline (recordStats → EXPERIMENT_COST_LIMIT_EXIT).
+   *  Absent = off (the testnet/offline default). Pair with an injected live equityFor. */
+  maxLossPerWalletX18?: string;
 }
 
 /** The locked single-pair self-cross benchmark campaign (decisions #2/#4/#5): selfCross,
@@ -85,6 +89,7 @@ export function buildLiveCampaignInput(opts: LiveCampaignOpts): ExperimentCampai
     selfCross: true,
     closeMaker: "B",
     maxConcurrency: opts.maxConcurrency ?? 1,
+    ...(opts.maxLossPerWalletX18 !== undefined ? { maxLossPerWalletX18: opts.maxLossPerWalletX18 } : {}),
     groups: [{ id: "g1", pairs: [{ id: "p0", a: opts.a, b: opts.b }] }],
   } as ExperimentCampaignInput;
 }

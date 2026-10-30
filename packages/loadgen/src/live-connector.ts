@@ -27,7 +27,7 @@ import {
 } from "@farm/core";
 import type { MultiWalletNadoGateway, NadoMarketSizing } from "@farm/adapter-nado";
 import type { WalletSigner } from "@farm/adapter-api";
-import { NadoExperimentConnector, type OrderFillSource, type DispatchErrorNormaliser } from "./experiment-connector.js";
+import { NadoExperimentConnector, type OrderFillSource, type EquitySource, type DispatchErrorNormaliser } from "./experiment-connector.js";
 
 /** The canonical owner form used everywhere in the harness (the coordinator's lowercased
  *  owner()). Always route a signer/pair/gateway owner through this. */
@@ -47,6 +47,10 @@ export interface LiveConnectorDeps {
   clock: () => number;
   /** The live A-5 OrderFillSource (createLiveOrderFillSource). */
   orderFill: OrderFillSource;
+  /** The live per-wallet equity source (createLiveEquitySource); unset offline (placeholder
+   *  equity). Threaded straight into the connector so the per-wallet maxLoss is enforced on real
+   *  equity for a real-funds run. */
+  equityFor?: EquitySource;
   admit: OrderAdmission<ExperimentCampaign>;
   store: OperationsStore<ExperimentCampaign>;
   normaliseError?: DispatchErrorNormaliser;
@@ -96,6 +100,7 @@ export function assembleLiveConnector(deps: LiveConnectorDeps): LiveConnector {
     clock,
     marketIdFor: deps.marketIdFor,
     orderFill: deps.orderFill,
+    equityFor: deps.equityFor,
     admit: deps.admit,
     store: deps.store,
     normaliseError: deps.normaliseError,

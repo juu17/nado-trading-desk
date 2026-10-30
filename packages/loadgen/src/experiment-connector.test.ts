@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryOperationsStore, type ExperimentCampaign, type ExperimentPair, type ExperimentOrderRequest, type ExperimentOrder } from "@farm/core";
 import type { NadoGateway } from "@farm/adapter-nado";
 import type { WalletSigner } from "@farm/adapter-api";
-import { NadoExperimentConnector, defaultNormaliseError, type OrderFillSource } from "./experiment-connector.js";
+import { NadoExperimentConnector, defaultNormaliseError, type OrderFillSource, type EquitySource } from "./experiment-connector.js";
 import { classifyDispatch } from "./classify.js";
 
 const address = (n: number) => ("0x" + n.toString(16).padStart(40, "0")) as `0x${string}`;
@@ -24,13 +24,13 @@ const request = (over: Partial<ExperimentOrderRequest> = {}): ExperimentOrderReq
   ({ id: "experiment:c:p1:1:A_OPEN:1", role: "A_OPEN", owner: A, side: "BUY", postOnly: true, reduceOnly: false, ...over });
 
 type SubmitResult = { digest: string; status: string; raw: unknown };
-function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderFillSource; book?: { bids: { price: string; size: string }[]; asks: { price: string; size: string }[] }; makerHeadroomTicks?: number } = {}) {
+function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderFillSource; book?: { bids: { price: string; size: string }[]; asks: { price: string; size: string }[] }; makerHeadroomTicks?: number; equityFor?: EquitySource; positions?: { side: "long" | "short"; size: string }[] } = {}) {
   let bookReads = 0;
   const gateway = {
     async getOrderBook() { bookReads++; return { market: "nado:perp:BTC-PERP", bids: opts.book?.bids ?? [{ price: "100", size: "10" }], asks: opts.book?.asks ?? [{ price: "101", size: "10" }], ts: 0, raw: null } as never; },
     async submitOrder(signed: unknown) { return (opts.onSubmit ?? (() => ({ digest: "0x" + "d".repeat(64), status: "open", raw: {} })))(signed); },
     async cancelOrders() { return { cancelled: [], raw: {} }; },
-    async getPositions() { return []; },
+    async getPositions() { return (opts.positions ?? []) as never; },
     async getOpenOrders() { return []; },
     async getMarkets() { return []; },
     async getFills() { return []; },
@@ -43,7 +43,7 @@ function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderF
     chainId: 763373, endpoint: address(99), forOwner: () => gateway, signerFor: () => signer,
     sizingFor: () => ({ tickSize: "1", stepSize: "0.001", minSize: "0.001", minNotional: "100" }),
     clock: () => 1_000_000_000_000, marketIdFor: () => "nado:perp:BTC-PERP", orderFill: fill,
-    admit: () => {}, store, makerHeadroomTicks: opts.makerHeadroomTicks,
+    equityFor: opts.equityFor, admit: () => {}, store, makerHeadroomTicks: opts.makerHeadroomTicks,
   });
   return { conn, store, gateway, get bookReads() { return bookReads; } };
 }
@@ -142,6 +142,26 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
     expect(snap.a.owner).toBe(A);
     expect(snap.a.positionX18).toBe("0");
     expect(snap.a.openDigests).toEqual([]);
+  });
+
+  it("with NO equityFor injected, preflight equity is the inert placeholder (offline/benchmark path)", async () => {
+    const snap = await makeDeps().conn.preflight(campaign(), pair());
+    expect(snap.a.equityX18).toBe("100000000000000000000000");
+    expect(snap.b.equityX18).toBe("100000000000000000000000");
+  });
+
+  it("with an injected equityFor, preflight carries the REAL per-wallet equity (the maxLoss input)", async () => {
+    // Distinct equity per owner proves the source is consulted per wallet, not a shared constant.
+    const equityFor: EquitySource = async (owner) => (owner === A ? "9000000000000000000" : "7000000000000000000");
+    const snap = await makeDeps({ equityFor }).conn.preflight(campaign(), pair());
+    expect(snap.a.equityX18).toBe("9000000000000000000");
+    expect(snap.b.equityX18).toBe("7000000000000000000");
+  });
+
+  it("a null equityFor result flows through as null (blocks new risk; core keeps the flat baseline)", async () => {
+    const snap = await makeDeps({ equityFor: async () => null }).conn.preflight(campaign(), pair());
+    expect(snap.a.equityX18).toBeNull();
+    expect(snap.b.equityX18).toBeNull();
   });
 });
 

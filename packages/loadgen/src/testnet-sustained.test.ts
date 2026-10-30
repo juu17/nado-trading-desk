@@ -36,6 +36,7 @@ import {
 import type { MarketId } from "@farm/adapter-api";
 import { createLiveOrderFillSource } from "./live-order-fill.js";
 import { assembleLiveConnector, registerNadoWriteBuckets, canonicalOwner } from "./live-connector.js";
+import { createLiveEquitySource } from "./live-equity.js";
 import { createLiveBenchmarkDriverDeps, buildLiveCampaignInput } from "./live-benchmark.js";
 import { BenchmarkDriver } from "./ramp.js";
 import { RunMetrics } from "./metrics.js";
@@ -150,10 +151,14 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
 
     // ---- real coordinator + live connector over ONE shared store ----------------------------
     const store = new InMemoryOperationsStore<ExperimentCampaign>();
+    // Real per-wallet equity (getBalances → USDT0 collateral) so the coordinator enforces the
+    // per-wallet maxLoss on live equity. Testnet: wired but harmless (maxLoss unset below). The
+    // read goes through the real gateway (not the submit-logging proxy).
+    const equityFor = createLiveEquitySource((o) => gateway.forOwner(o) as NadoGateway);
     const live = assembleLiveConnector({
       chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, gateway: loggedGateway, signers: [signerA, signerB],
       sizingFor: () => sizing, marketIdFor: () => marketId, clock: () => new ClockSync().now(),
-      orderFill, admit: assertExperimentOrderAdmission, store, makerHeadroomTicks: MAKER_HEADROOM,
+      orderFill, equityFor, admit: assertExperimentOrderAdmission, store, makerHeadroomTicks: MAKER_HEADROOM,
     });
     say(`  deeper maker: headroom ${MAKER_HEADROOM} tick(s) from the opposite touch (post-only rests through a tighten)`);
     // DIAGNOSTIC: surface swallowed per-pair lane errors (Promise.allSettled hides them) + events.

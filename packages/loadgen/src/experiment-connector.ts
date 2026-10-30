@@ -33,8 +33,11 @@ import { classifyDispatch, type DispatchErrorInfo } from "./classify.js";
 import { OrderIdentityCache } from "./order-identity.js";
 
 const DEFAULT_TTL_SECS = 7 * 24 * 60 * 60;
-// Placeholder flat-baseline equity (x18) for preflight on the no-sizing benchmark path; real
-// equity is read from getBalances at the testnet gate (see docs/phasea-testnet-validation.md).
+// Placeholder flat-baseline equity (x18) used ONLY when no live `equityFor` source is injected
+// (the no-sizing / no-maxLoss offline+benchmark path, where risk accounting must stay inert
+// without blocking new risk — `null` would block it). A real-funds run injects `equityFor`
+// (getBalances → sum USDT0 collateral; see createLiveEquitySource) so the per-wallet maxLoss the
+// coordinator already models (recordStats) sees a real, moving equity instead of this constant.
 const PLACEHOLDER_EQUITY_X18 = "100000000000000000000000";
 
 /** The authoritative per-order fill, resolved from the LIVE Nado read path at the testnet
@@ -45,6 +48,17 @@ export interface OrderFillSource {
   (owner: string, productId: number, digest: string): Promise<
     { filledX18: string; quoteFilledX18: string; feePaidX18: string; terminal: boolean; resting: boolean } | undefined
   >;
+}
+
+/** Real per-wallet account equity (x18 signed integer string), resolved from the LIVE account
+ *  read (getBalances → sum of the wallet's USDT0 collateral, marked to market). Injected at the
+ *  real-funds gate; left unset on the pure offline/benchmark path (then a flat placeholder keeps
+ *  the coordinator's risk accounting inert). A `null` result means equity is not observable right
+ *  now → the coordinator blocks NEW risk and keeps the flat baseline (ExperimentWalletSnapshot
+ *  contract), never a silent zero. Keeping this injectable is what lets the offline fakes run
+ *  unchanged while the live path enforces the real per-wallet maxLoss. */
+export interface EquitySource {
+  (owner: string): Promise<string | null>;
 }
 
 /** Normalises a raw gateway/transport error into the classifier's view. The raw→this mapping
@@ -68,6 +82,10 @@ export interface NadoExperimentConnectorDeps {
   marketIdFor(productId: number): string;
   /** LIVE per-order fill source (A-5). Injected at the testnet gate; faked in tests. */
   orderFill: OrderFillSource;
+  /** LIVE per-wallet equity source (getBalances → USDT0 collateral). Injected for a real-funds
+   *  run so the per-wallet maxLoss cap is enforced on real equity; unset offline (the placeholder
+   *  equity keeps risk accounting inert). See EquitySource. */
+  equityFor?: EquitySource;
   /** The experiment order-admission guard (experiment/guards.assertExperimentOrderAdmission). */
   admit: OrderAdmission<ExperimentCampaign>;
   /** The desk store the ledger persists through (shared with the coordinator). */
@@ -331,10 +349,13 @@ export class NadoExperimentConnector implements ExperimentConnector {
     const gw = this.deps.forOwner(owner);
     const [positions, openOrders] = await Promise.all([gw.getPositions("default"), gw.getOpenOrders("default")]);
     const net = positions.reduce((n, pos) => n + (pos.side === "short" ? -1n : 1n) * toX18(pos.size), 0n);
-    // [live-gated] Real per-wallet equity comes from getBalances (sum USDT0 collateral) at the
-    // testnet gate; the benchmark path uses no maxLoss/sizing, so a non-null placeholder keeps
-    // the coordinator's risk accounting inert without blocking new risk (null would block it).
-    return { owner, positionX18: String(net), openDigests: openOrders.map((o) => o.venueId ?? "").filter(Boolean), equityX18: PLACEHOLDER_EQUITY_X18 };
+    // Real per-wallet equity from the injected live source (getBalances → sum USDT0 collateral);
+    // its `null` means equity-not-observable (the coordinator then blocks new risk and keeps the
+    // flat baseline). With NO source injected (pure offline / no-maxLoss benchmark) the non-null
+    // placeholder keeps risk accounting inert without blocking new risk. This is the one place the
+    // self-cross path ignored real risk; `equityFor` closes it while keeping the offline fakes pure.
+    const equityX18 = this.deps.equityFor ? await this.deps.equityFor(owner) : PLACEHOLDER_EQUITY_X18;
+    return { owner, positionX18: String(net), openDigests: openOrders.map((o) => o.venueId ?? "").filter(Boolean), equityX18 };
   }
 
   private mintNonce(): string {
