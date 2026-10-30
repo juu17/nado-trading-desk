@@ -53,15 +53,16 @@ export interface DispatchVerdict {
 export const DIGEST_ALREADY_EXISTS = 2013;
 
 /** Market-state / admissibility refusals: received by the sequencer, not placed, safe to re-price.
+ *  2000 invalid-order-price (not tick-divisible — provably NOT placed, re-price; never unknown→halt),
  *  2011 late-recv, 2004 expired, 2007 price-band, 2008 post-only-would-cross, 2006/2036/2092
  *  margin/health, 2003/2094/2119 min-size (the coordinator treats {2003,2067,2094,2119} as
  *  below-minimum size refusals — keep this set in sync), 2023 address-screening, 2067
- *  reduce-only-not-applicable, 2069 trading-blocked-for-this-market. 2008 + 2069 were
- *  LIVE-confirmed 2026-10-30 (a post-only maker that crossed a moved book; a disabled testnet
- *  perp) — both are per-order refusals, NOT maybe-placed unknown→halt; the round re-prices /
- *  the operator re-selects. A refusal is the SAFE bucket (one order, no halt); the full table
- *  was cross-checked at the testnet gate. */
-export const REFUSAL_CODES: ReadonlySet<number> = new Set([2011, 2004, 2007, 2008, 2006, 2036, 2092, 2003, 2094, 2119, 2023, 2067, 2069]);
+ *  reduce-only-not-applicable, 2069 trading-blocked-for-this-market, 2070 market-at-max-open-
+ *  interest (close-only). 2008 + 2069 + 2070 were LIVE-confirmed 2026-10-30 (a post-only maker
+ *  that crossed a moved book; a disabled testnet perp; an at-OI-cap perp) — all per-order
+ *  refusals, NOT maybe-placed unknown→halt; the round re-prices / the operator re-selects. A
+ *  refusal is the SAFE bucket (one order, no halt); the full table was cross-checked at the gate. */
+export const REFUSAL_CODES: ReadonlySet<number> = new Set([2000, 2011, 2004, 2007, 2008, 2006, 2036, 2092, 2003, 2094, 2119, 2023, 2067, 2069, 2070]);
 
 /** Malformed / mis-signed: the request itself is wrong, so every like order would fail — stop all.
  *  2095 invalid appendix; extend only with codes confirmed to mean "the client built it wrong". */

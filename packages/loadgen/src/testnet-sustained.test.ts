@@ -49,8 +49,10 @@ const wsUrl = ENGINE_WS_SUBSCRIPTION_CLIENT_ENDPOINTS[ENV];
 const DEPLOY = NADO_DEPLOYMENTS[ENV];
 const SUBACCT = "default";
 const WINDOW_MS = Number(process.env.AB_WINDOW_MS ?? 150_000); // ~2.5 min; >=60s stable
-// FLAT candidates: A & B are flat in everything except BTC (pid 2) and WETH (pid 3) — exclude those.
-const CANDIDATES = (process.env.AB_PRODUCT_ID ? [Number(process.env.AB_PRODUCT_ID)] : [166, 174, 145, 147, 149, 151, 153, 115, 117, 159, 22, 48]);
+// Candidates = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them). Equity perps are
+// TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
+// (scripts/tradable-probe.mjs): FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. BTC(2)/WETH(3) excluded.
+const CANDIDATES = (process.env.AB_PRODUCT_ID ? [Number(process.env.AB_PRODUCT_ID)] : [22, 48, 52, 76, 46, 86, 72]);
 
 const J = (v: unknown) => JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x));
 const fx = (v: unknown): number => (v == null ? NaN : typeof v === "object" && (v as { toFixed?: unknown }).toFixed ? Number((v as { toFixed: () => string }).toFixed()) : Number(v));
@@ -112,6 +114,16 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     results.market = { productId: PID, symbol, tick, sizing };
 
     const gateway = createMultiWalletNadoGateway({ engine: engine as never, transport, limiter: readShim, engineUrl, chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, markets: [], productIds });
+    // DIAGNOSTIC: surface the RAW submitOrder error (the relay classifies + rethrows, hiding it).
+    let rawSubmitErr = "";
+    const loggedGateway = {
+      owners: () => gateway.owners(),
+      forOwner: (o: string) => new Proxy(gateway.forOwner(o), {
+        get: (t: any, p: string) => p === "submitOrder"
+          ? async (s: unknown) => { try { return await t.submitOrder(s); } catch (e: any) { if (!rawSubmitErr) { rawSubmitErr = J({ msg: e?.message, code: e?.code, category: e?.category, raw: e?.raw, name: e?.name }); say(`  [submit-raw] ${rawSubmitErr.slice(0, 400)}`); } throw e; } }
+          : t[p],
+      }),
+    } as unknown as typeof gateway;
 
     // keyless public fill stream → accumulator (A-5 wake + per-fill feed)
     const acc = new FillAccumulator();
@@ -131,11 +143,24 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     // ---- real coordinator + live connector over ONE shared store ----------------------------
     const store = new InMemoryOperationsStore<ExperimentCampaign>();
     const live = assembleLiveConnector({
-      chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, gateway, signers: [signerA, signerB],
+      chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, gateway: loggedGateway, signers: [signerA, signerB],
       sizingFor: () => sizing, marketIdFor: () => marketId, clock: () => new ClockSync().now(),
       orderFill, admit: assertExperimentOrderAdmission, store,
     });
-    const coordinator = new ExperimentCoordinator(store, live.connector, { now: Date.now, random: Math.random, chain: true });
+    // DIAGNOSTIC: surface swallowed per-pair lane errors (Promise.allSettled hides them) + events.
+    let firstConnErr = "";
+    const base = live.connector;
+    const wrapErr = (name: string, fn: (...a: any[]) => Promise<any>) => (...a: any[]) => fn(...a).catch((e: any) => { if (!firstConnErr) { firstConnErr = `${name}: ${e?.message}`; say(`  [conn-throw] ${firstConnErr} | detail=${J({ name: e?.name, code: e?.code, nadoCode: e?.nadoCode, httpStatus: e?.httpStatus, raw: e?.raw, keys: Object.keys(e ?? {}) }).slice(0, 400)}`); } throw e; });
+    const dbg = {
+      preflight: wrapErr("preflight", (...a: any[]) => base.preflight(a[0], a[1])),
+      prepare: wrapErr("prepare", (...a: any[]) => base.prepare(a[0], a[1], a[2])),
+      dispatch: wrapErr("dispatch", (...a: any[]) => base.dispatch(a[0], a[1], a[2])),
+      lookup: (...a: any[]) => base.lookup(a[0], a[1]), cancel: (...a: any[]) => base.cancel(a[0], a[1], a[2]),
+      rollover: () => base.rollover(), lookupRollover: (...a: any[]) => base.lookupRollover(a[0], a[1]),
+      livePositions: (c: any) => base.livePositions(c), fillHints: (c: any) => base.fillHints(c),
+    } as unknown as typeof base;
+    const coordinator = new ExperimentCoordinator(store, dbg, { now: Date.now, random: Math.random, chain: true,
+      onEvent: (e: { level: string; event: string; data?: unknown }) => { if (e.level !== "info" || /start|order_send|set_aside|flatten/.test(e.event)) say(`  [evt] ${e.level} ${e.event}${e.data ? " " + J(e.data).slice(0, 140) : ""}`); } });
     const campaign = buildLiveCampaignInput({ chainId: CHAIN_ID, productId: PID, a: A, b: B, orderNotionalX18: "100000000000000000000", slotMs: TURBO_SLOT_MS, maxConcurrency: 1 });
 
     // baselines (expect flat on a non-BTC/WETH market)
@@ -160,6 +185,7 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
 
     let summary: Awaited<ReturnType<BenchmarkDriver["runLevel"]>>["summary"] | undefined;
     try {
+      await live.connector.ledger.enable(); // the OrderLedger starts HALTED (code TRADING_STOPPED); enable trading
       await coordinator.create(campaign);
       await coordinator.start(campaign.id);
       const startMs = Date.now();
@@ -182,6 +208,14 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
       results.terminated = terminated ?? (e as Error).message;
       say(`  🚨 RUN TERMINATED: ${results.terminated} — zeros past this are NOT counted.`);
     } finally {
+      // DIAGNOSTIC dump: why did/didn't rounds open?
+      try {
+        const camp = (await coordinator.query(campaign.id))[0];
+        const pr = camp?.groups?.[0]?.pairs?.[0];
+        say(`  [dump] campaign.state=${camp?.state} wallets=[${Object.keys(camp?.wallets ?? {}).join(",")}] pair.state=${pr?.state} pair.err=${pr?.errorCode ?? "-"} rounds=${pr?.rounds?.length ?? 0} roundStates=[${(pr?.rounds ?? []).map((r) => r.state).join(",")}]`);
+        say(`  [dump] firstConnErr=${firstConnErr || "none"}`);
+        results.diag = { campaignState: camp?.state, walletKeys: Object.keys(camp?.wallets ?? {}), pairState: pr?.state, pairErr: pr?.errorCode, rounds: pr?.rounds?.length ?? 0, firstConnErr };
+      } catch (e) { say(`  [dump] failed: ${(e as Error).message}`); }
       // wind down: request exit so the coordinator closes any open round, then prove flat+settled
       try { await coordinator.requestExit(campaign.id); } catch { /* ignore */ }
       for (let i = 0; i < 40; i++) { await coordinator.tick(campaign.id).catch(() => {}); await sleep(Math.max(1, Math.floor(TURBO_SLOT_MS / 20))); }

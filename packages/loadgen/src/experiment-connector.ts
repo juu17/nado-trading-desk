@@ -175,12 +175,18 @@ export class NadoExperimentConnector implements ExperimentConnector {
       // the reference — deterministic-cross tuning is confirmed at the testnet gate.
       const ref = Number(bestBid ?? bestAsk ?? "0") || Number(request.notionalX18 ? "0" : "0");
       const tick = Number(sizing.tickSize) || 0;
+      const tickDec = (sizing.tickSize.split(".")[1] || "").length; // tick's decimal places
       const slip = (request.slippageBps ?? c.slippageBps) / 10_000;
       let price: number;
       if (postOnly) price = request.side === "BUY" ? (Number(bestBid ?? ref) + tick) : (Number(bestAsk ?? ref) - tick);
       else price = request.side === "BUY" ? Number(bestAsk ?? ref) * (1 + slip) : Number(bestBid ?? ref) * (1 - slip);
       if (!(price > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID");
-      const priceStr = String(price);
+      // Snap to the tick grid — BUY ceils, SELL floors, so a taker stays aggressive enough to
+      // cross and a maker stays passive — then format to the tick's decimals; otherwise the
+      // sequencer rejects the order 2000 "price not divisible by the price_increment" (the slip
+      // multiplier on the taker price lands off-grid). Confirmed live at the testnet gate.
+      if (tick > 0) { const ticks = request.side === "BUY" ? Math.ceil(price / tick) : Math.floor(price / tick); price = ticks * tick; }
+      const priceStr = tick > 0 ? price.toFixed(tickDec) : String(price);
       // size: an explicit base qty (a follow/close) stays; else notional → base at this price.
       const baseSize = request.quantityX18 !== undefined ? formatUnits(BigInt(request.quantityX18), 18)
         : String(Number(formatUnits(BigInt(request.notionalX18 ?? c.orderNotionalX18), 18)) / price);

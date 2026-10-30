@@ -45,9 +45,10 @@ describe("classifyDispatch — halt vs drop-one vs placed", () => {
     expect(classifyDispatch({ nadoCode: 2013, httpStatus: 502 }).kind).toBe("deduped");
   });
 
-  it("classifies the LIVE-confirmed refusals 2008 (post-only crosses) and 2069 (trading blocked) as refused, not unknown→halt", () => {
-    // Both were observed live on Ink testnet 2026-10-30 and MUST drop one order, never halt.
+  it("classifies the LIVE-confirmed refusals 2008 (post-only crosses), 2069 (trading blocked), 2070 (max OI) as refused, not unknown→halt", () => {
+    // All observed live on Ink testnet 2026-10-30 and MUST drop one order, never halt.
     expect(classifyDispatch({ nadoCode: 2008 })).toEqual({ kind: "refused", code: "2008" });
     expect(classifyDispatch({ nadoCode: 2069 })).toEqual({ kind: "refused", code: "2069" });
+    expect(classifyDispatch({ nadoCode: 2070 })).toEqual({ kind: "refused", code: "2070" });
   });
 });
