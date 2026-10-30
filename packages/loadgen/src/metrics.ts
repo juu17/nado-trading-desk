@@ -156,6 +156,7 @@ export function extractRoundMetrics(round: ExperimentRound): RoundMetrics {
  */
 export class RunMetrics {
   private readonly events: MatchEvent[] = [];
+  private readonly roundInfo = new Map<string, { hedged: boolean; filledLegs: number }>();
   private filledLegs = 0;
   private rounds = 0;
   private hedgedRounds = 0;
@@ -163,6 +164,7 @@ export class RunMetrics {
   addRound(round: ExperimentRound): void {
     const m = extractRoundMetrics(round);
     this.events.push(...m.matches);
+    this.roundInfo.set(round.id, { hedged: m.hedged, filledLegs: m.filledLegs });
     this.filledLegs += m.filledLegs;
     this.rounds += 1;
     if (m.hedged) this.hedgedRounds += 1;
@@ -183,22 +185,37 @@ export class RunMetrics {
 
   /** The headline readout. Pass `windowMs` (the measurement window's wall-clock duration) for the
    *  honest SUSTAINED rate; omit it only for a quick burst-rate approximation (over-states a run
-   *  that stalled after the knee). */
-  summary(windowMs?: number): RunSummary {
-    const ats = this.events.map((e) => e.atMs);
+   *  that stalled after the knee). Pass `timeWindow` to attribute by MATCH TIMESTAMP: only matches
+   *  whose atMs ∈ [startMs, endMs) count — the correct way to assign a cross to a concurrency
+   *  level, robust to the coordinator pre-minting the next round at a level boundary (a round
+   *  minted under level K but FIRING in K+1's window is filed into K+1 by its atMs, never lost or
+   *  double-counted). windowMs then defaults to the window's own duration. */
+  summary(windowMs?: number, timeWindow?: { startMs: number; endMs: number }): RunSummary {
+    const ev = timeWindow ? this.events.filter((e) => e.atMs >= timeWindow.startMs && e.atMs < timeWindow.endMs) : this.events;
+    const ats = ev.map((e) => e.atMs);
     const spanMs = ats.length > 1 ? maxOf(ats) - minOf(ats) : 0;
-    const windowed = windowMs !== undefined && windowMs > 0;
-    const denomMs = windowed ? windowMs : spanMs;
-    const matchedFills = this.events.length;
+    const explicitWindow = windowMs !== undefined && windowMs > 0;
+    const denomMs = explicitWindow ? windowMs : timeWindow ? timeWindow.endMs - timeWindow.startMs : spanMs;
+    const windowed = explicitWindow || timeWindow !== undefined;
+    const matchedFills = ev.length;
     const fillsPerSec = denomMs > 0 ? matchedFills / (denomMs / 1000) : matchedFills;
-    const sum = (f: (e: MatchEvent) => bigint): string => String(this.events.reduce((n, e) => n + f(e), 0n));
+    const sum = (f: (e: MatchEvent) => bigint): string => String(ev.reduce((n, e) => n + f(e), 0n));
+    // Round-level context: whole-collection counters for a non-time-windowed summary; for a time
+    // window, the rounds whose matches fell in it (filledLegs of a boundary-straddling round may
+    // be attributed to both windows it touches — context only, not the headline).
+    let rounds = this.rounds, hedgedRounds = this.hedgedRounds, filledLegs = this.filledLegs;
+    if (timeWindow) {
+      const ids = new Set(ev.map((e) => e.roundId));
+      rounds = ids.size; hedgedRounds = 0; filledLegs = 0;
+      for (const id of ids) { const info = this.roundInfo.get(id); if (info) { if (info.hedged) hedgedRounds++; filledLegs += info.filledLegs; } }
+    }
     const lat = (leg: "open" | "close"): number[] =>
-      this.events.filter((e) => e.leg === leg && e.latencyMs !== undefined).map((e) => e.latencyMs as number).sort((a, b) => a - b);
+      ev.filter((e) => e.leg === leg && e.latencyMs !== undefined).map((e) => e.latencyMs as number).sort((a, b) => a - b);
     const open = lat("open"), close = lat("close"), all = [...open, ...close].sort((a, b) => a - b);
     return {
-      matchedFills, filledLegs: this.filledLegs,
+      matchedFills, filledLegs,
       matchedBaseX18: sum((e) => bi(e.baseX18)), matchedQuoteX18: sum((e) => bi(e.quoteX18)),
-      rounds: this.rounds, hedgedRounds: this.hedgedRounds, spanMs, windowMs: denomMs, windowed, fillsPerSec,
+      rounds, hedgedRounds, spanMs, windowMs: denomMs, windowed, fillsPerSec,
       latency: {
         count: all.length,
         openP50: percentile(open, 50), openP99: percentile(open, 99),

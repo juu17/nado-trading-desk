@@ -166,6 +166,22 @@ describe("metrics — RunMetrics summary + timeseries + curve", () => {
     expect(m.summary().matchedFills).toBe(3); // 2 (completed) + 1 (in-flight open cross)
   });
 
+  it("summary(timeWindow) attributes matches by atMs — a cross counts in the window it FIRES in, regardless of when its round was minted", () => {
+    const m = new RunMetrics();
+    // Round 1's open cross fires at atMs 1200 (inside [1000,2000)); its round may have been minted earlier.
+    m.addRound(round(1, [ord("A_OPEN", { filled: "100", createdAt: 1190 }), ord("B_OPEN", { filled: "100", createdAt: 1210 })], { sourceFilledAt: 1200 }));
+    // Round 2's open cross fires at atMs 500 (before the window) → excluded.
+    m.addRound(round(2, [ord("A_OPEN", { filled: "50", createdAt: 490 }), ord("B_OPEN", { filled: "50", createdAt: 510 })], { sourceFilledAt: 500 }));
+    // Round 3's open cross fires at exactly atMs 2000 (the window END is exclusive) → excluded.
+    m.addRound(round(3, [ord("A_OPEN", { filled: "7", createdAt: 1990 }), ord("B_OPEN", { filled: "7", createdAt: 2010 })], { sourceFilledAt: 2000 }));
+    const s = m.summary(1000, { startMs: 1000, endMs: 2000 });
+    expect(s.matchedFills).toBe(1);          // only round 1's cross is in [1000, 2000)
+    expect(s.rounds).toBe(1);                // only round 1 contributed a windowed match
+    expect(s.windowMs).toBe(1000);
+    expect(s.fillsPerSec).toBeCloseTo(1, 6);
+    expect(m.summary().matchedFills).toBe(3); // the whole run (no window) sees all three
+  });
+
   it("aggregateCurve sorts per-N summaries into the fills/sec + p50/p99 vs N curve", () => {
     const summ = (fillsPerSec: number, p50: number, p99: number, matchedFills: number): RunSummary => ({
       matchedFills, filledLegs: matchedFills * 2, matchedBaseX18: "0", matchedQuoteX18: "0",
