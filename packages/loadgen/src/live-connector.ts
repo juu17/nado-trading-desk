@@ -22,7 +22,6 @@
 //      prepare() so a divergence fails loud + unsent instead of signing the wrong chain.
 // =============================================================================
 import {
-  READ_BUDGET_BURST, READ_BUDGET_MAX_RATE,
   type RateLimiter,
   type OrderAdmission, type OperationsStore, type ExperimentCampaign,
 } from "@farm/core";
@@ -104,13 +103,19 @@ export function assembleLiveConnector(deps: LiveConnectorDeps): LiveConnector {
 }
 
 // -----------------------------------------------------------------------------
-// Write-bucket registration (#3). The shared single-IP budget meters READS (nado:read);
+// Write-bucket registration (#3). The shared single-IP budget meters READS (nado:read, 28/s);
 // order submits/cancels use nado:place / nado:rest, which are UNREGISTERED by default →
-// unlimited pass-through. Register them on the ONE shared RateLimiter so writes are metered
-// on the same authority. ⚠️ The rates here are conservative PLACEHOLDERS (the single-IP read
-// ceiling as a basis); the real per-IP order/cancel allowance is operator-calibrated against
-// the live sequencer at the testnet gate before any capacity ramp (docs §1/§6).
+// unlimited pass-through. Register them on the ONE shared RateLimiter so writes are metered on
+// the same authority. The write path (/execute) has a SEPARATE, tighter per-IP limit than the
+// query path: LIVE-calibrated 2026-10-30 (scripts/calibrate-write-budget.mjs) — place+cancel was
+// clean at 8 pairs/s and the first 429 hit at ~12/s, so the safe sustained write rate is ~8/s
+// (well below the 28/s read budget). Re-calibrate before a multi-pair ramp pushes the ceiling.
 // -----------------------------------------------------------------------------
+/** LIVE-calibrated safe per-IP write rates (ops/sec) — the highest clean place/cancel rate below
+ *  the first 429. A single pair stays far under this; it binds the multi-pair ramp, not N=1. */
+export const NADO_PLACE_RATE = 8;
+export const NADO_CANCEL_RATE = 8;
+
 export interface NadoWriteBudget {
   placeCapacity?: number;   // token-bucket burst for order submits (nado:place, per subaccount)
   placeWindowMs?: number;   // window over which `placeCapacity` refills
@@ -119,10 +124,10 @@ export interface NadoWriteBudget {
 }
 
 export function registerNadoWriteBuckets(limiter: RateLimiter, budget: NadoWriteBudget = {}): RateLimiter {
-  const placeCapacity = budget.placeCapacity ?? READ_BUDGET_BURST;
-  const placeWindowMs = budget.placeWindowMs ?? (READ_BUDGET_BURST * 1000) / READ_BUDGET_MAX_RATE;
-  const restCapacity = budget.restCapacity ?? READ_BUDGET_BURST;
-  const restWindowMs = budget.restWindowMs ?? (READ_BUDGET_BURST * 1000) / READ_BUDGET_MAX_RATE;
+  const placeCapacity = budget.placeCapacity ?? NADO_PLACE_RATE;
+  const placeWindowMs = budget.placeWindowMs ?? 1000;   // refills NADO_PLACE_RATE/sec at burst=capacity
+  const restCapacity = budget.restCapacity ?? NADO_CANCEL_RATE;
+  const restWindowMs = budget.restWindowMs ?? 1000;
   return limiter.register([
     { bucket: "nado:place", scope: "subaccount", algo: "token-bucket", capacity: placeCapacity, windowMs: placeWindowMs },
     { bucket: "nado:rest", scope: "ip", algo: "token-bucket", capacity: restCapacity, windowMs: restWindowMs },
