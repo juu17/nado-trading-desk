@@ -39,6 +39,7 @@ import { assembleLiveConnector, registerNadoWriteBuckets, canonicalOwner } from 
 import { createLiveEquitySource, decimalToX18 } from "./live-equity.js";
 import { GlobalNetLossStop, cohortEquityReader } from "./global-stop.js";
 import { StrayGuard, AbortGrace } from "./stray-guard.js";
+import { pickMarket, type MarketCandidate } from "./market-picker.js";
 import { createLiveBenchmarkDriverDeps, buildLiveCampaignInput } from "./live-benchmark.js";
 import { BenchmarkDriver } from "./ramp.js";
 import { RunMetrics } from "./metrics.js";
@@ -82,10 +83,17 @@ const STRAY_STOP_COST_X18 = process.env.NADO_STRAY_STOP_COST_X18 ? BigInt(proces
 // aborting — survives a stray's own flatten instead of a false instant abort (the ASTER case).
 // UNKNOWN=abort is preserved: grace only DELAYS, and a FATAL/REJECT is never graced.
 const UNKNOWN_GRACE_MS = Number(process.env.NADO_UNKNOWN_GRACE_MS ?? 3000);
-// Candidates = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them). Equity perps are
-// TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
-// (scripts/tradable-probe.mjs): FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. BTC(2)/WETH(3) excluded.
-const CANDIDATES = (process.env.AB_PRODUCT_ID ? [Number(process.env.AB_PRODUCT_ID)] : [22, 48, 52, 76, 46, 86, 72]);
+const IS_MAINNET = CHAIN_ID === 57073;
+// TESTNET candidate pids = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them), live-probed
+// 2026-10-30: FARTCOIN, ASTER, DOGE, LTC, UNI, JUP, ENA. On MAINNET the picker instead discovers
+// candidates dynamically from getSymbols and filters to 24/7 crypto perps (design §7) — ranking by
+// widest raw spread there picks FX mirages / halt-prone equity perps.
+const TESTNET_CANDIDATE_PIDS = [22, 48, 52, 76, 46, 86, 72];
+// Mainnet picker: sample the spread several times (stable, not a one-shot wide reading) and reject
+// a MIRAGE book (spread wider than this fraction of mid — GBPUSD ≈ 14%). Inert on testnet.
+const SPREAD_SAMPLES = Number(process.env.NADO_SPREAD_SAMPLES ?? (IS_MAINNET ? 4 : 1));
+const SPREAD_SAMPLE_GAP_MS = Number(process.env.NADO_SPREAD_SAMPLE_GAP_MS ?? 2000);
+const MAX_SPREAD_FRAC_OF_MID = process.env.NADO_MAX_SPREAD_FRAC_OF_MID ? Number(process.env.NADO_MAX_SPREAD_FRAC_OF_MID) : (IS_MAINNET ? 0.02 : undefined);
 // Deeper post-only maker: rest MAKER_HEADROOM ticks inside the opposite touch so it survives a
 // tick-or-two tighten between book-read and submit (the ~98% 2008 at best±1t). The maker is
 // clamped to still improve its near touch, so the self-cross taker crosses A — BUT only if the
@@ -129,25 +137,34 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     const symbols: Record<string, any> = (await engine.getSymbols({})).symbols ?? {};
     const symByPid = new Map<number, any>(Object.values(symbols).map((s: any) => [s.productId, s]));
 
-    // pick a FLAT wide-spread market (poll for a >=2-tick window)
-    let PID = 0, symbol = "", tick = 0;
-    for (let attempt = 0; attempt < Number(process.env.AB_SPREAD_ATTEMPTS ?? 45) && !PID; attempt++) {
-      let best = { spreadT: 0, pid: 0, tick: 0, symbol: "" };
-      for (const pid of CANDIDATES) {
-        const sy = symByPid.get(pid); if (!sy) continue;
-        const t = fx(sy.priceIncrement);
-        const liq: any = await engine.getMarketLiquidity({ productId: pid, depth: 1 }).catch(() => ({ bids: [], asks: [] }));
-        const bb = fx(liq.bids?.[0]?.price), ba = fx(liq.asks?.[0]?.price);
-        const spreadT = (bb > 0 && ba > 0 && t > 0) ? Math.round((ba - bb) / t) : 0;
-        if (spreadT > best.spreadT && ba > 0) best = { spreadT, pid, tick: t, symbol: sy.symbol };
-      }
-      // Need a spread wider than the maker headroom (SPREAD_FLOOR = headroom + 1) so the deeper
-      // maker rests with headroom AND still improves its near touch for a clean A↔B self-cross.
-      if (best.spreadT >= SPREAD_FLOOR) { PID = best.pid; tick = best.tick; symbol = best.symbol; say(`  selected FLAT market pid=${PID} ${symbol} spread=${best.spreadT}t (need >=${SPREAD_FLOOR}t for headroom ${MAKER_HEADROOM}, attempt ${attempt + 1})`); break; }
-      if (attempt === 0) say(`  widest flat-market spread ${best.spreadT}t (<${SPREAD_FLOOR}) — polling for a >=${SPREAD_FLOOR}-tick window (maker headroom ${MAKER_HEADROOM})…`);
+    // Pick the market via the reusable picker. MAINNET: discover candidates dynamically from
+    // getSymbols and filter to 24/7 crypto perps with a STABLE (multi-sample) spread ≥ floor,
+    // rejecting FX/equity perps + mirage books (design §7). TESTNET: the known crypto-perp pid list,
+    // single-sample, no filters (unchanged behaviour). AB_PRODUCT_ID pins one product on either.
+    const allCandidates: MarketCandidate[] = Object.values(symbols)
+      .map((s: any) => ({ productId: Number(s.productId), symbol: String(s.symbol ?? s.productId), tick: fx(s.priceIncrement) }))
+      .filter((c) => Number.isFinite(c.productId) && c.productId > 0 && c.tick > 0);
+    const candidates: MarketCandidate[] = process.env.AB_PRODUCT_ID
+      ? allCandidates.filter((c) => c.productId === Number(process.env.AB_PRODUCT_ID))
+      : IS_MAINNET ? allCandidates : allCandidates.filter((c) => TESTNET_CANDIDATE_PIDS.includes(c.productId));
+    const readTopOfBook = async (pid: number) => {
+      const liq: any = await engine.getMarketLiquidity({ productId: pid, depth: 1 }).catch(() => null);
+      const bidPx = fx(liq?.bids?.[0]?.price), askPx = fx(liq?.asks?.[0]?.price);
+      return bidPx > 0 && askPx > 0 ? { bidPx, askPx } : null;
+    };
+    say(`  market picker: ${IS_MAINNET ? "MAINNET" : "TESTNET"} · ${candidates.length} candidates · spread>=${SPREAD_FLOOR}t over ${SPREAD_SAMPLES} sample(s)${MAX_SPREAD_FRAC_OF_MID !== undefined ? ` · mirage>${(MAX_SPREAD_FRAC_OF_MID * 100).toFixed(0)}%-of-mid rejected · crypto-only` : ""}`);
+    let picked: Awaited<ReturnType<typeof pickMarket>> = null;
+    for (let attempt = 0; attempt < Number(process.env.AB_SPREAD_ATTEMPTS ?? 45) && !picked; attempt++) {
+      picked = await pickMarket(
+        { candidates, readTopOfBook, sleep, onReject: attempt === 0 ? (sym, _pid, reason) => say(`    - ${sym}: ${reason}`) : undefined },
+        { spreadFloorTicks: SPREAD_FLOOR, samples: SPREAD_SAMPLES, sampleGapMs: SPREAD_SAMPLE_GAP_MS, excludeNonCrypto: IS_MAINNET, maxSpreadFracOfMid: MAX_SPREAD_FRAC_OF_MID },
+      );
+      if (picked) { say(`  selected market pid=${picked.productId} ${picked.symbol} spreads=[${picked.spreadsTicks.join(",")}]t (min ${picked.minSpreadTicks} >= ${SPREAD_FLOOR}, attempt ${attempt + 1})`); break; }
+      if (attempt === 0) say(`  no stable ${IS_MAINNET ? "crypto " : ""}market with spread >=${SPREAD_FLOOR}t yet — polling (headroom ${MAKER_HEADROOM})…`);
       await sleep(1800);
     }
-    if (!PID) throw new Error(`no flat market with spread >=${SPREAD_FLOOR} ticks (maker headroom ${MAKER_HEADROOM}+1) appeared in the wait window — this testnet book cannot rest a top-of-book self-cross maker (venue ceiling)`);
+    if (!picked) throw new Error(`no ${IS_MAINNET ? "liquid crypto " : ""}market with a stable spread >=${SPREAD_FLOOR} ticks (maker headroom ${MAKER_HEADROOM}+1) appeared in the wait window`);
+    const PID = picked.productId, symbol = picked.symbol, tick = picked.tick;
     const marketId = `nado:perp:${symbol}` as MarketId;
     const productIds = { [marketId]: PID } as Record<MarketId, number>;
     const sym = symByPid.get(PID)!;
