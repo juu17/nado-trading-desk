@@ -80,4 +80,26 @@ describe("RateLimiter", () => {
     const rl = new RateLimiter().register([{ bucket: "b", scope: "ip", algo: "token-bucket", capacity: 2, windowMs: 1000 }]);
     await expect(rl.acquire("b", 5)).rejects.toThrow(/exceeds/);
   });
+
+  it("charge(): force-consume without a grant (may go below zero), waited off by later refills", () => {
+    const c = clock();
+    const rl = new RateLimiter({ now: c.now }).register([{ bucket: "b", scope: "ip", algo: "token-bucket", capacity: 10, windowMs: 1000 }]);
+    rl.charge("b", 14);                       // spent 14 against a 10-token bucket → -4
+    expect(rl.available("b")).toBeLessThan(0);
+    expect(rl.tryAcquire("b")).toBe(false);   // the debt blocks grants
+    c.advance(1000);                          // +10
+    expect(rl.available("b")).toBe(6);        // -4 + 10
+    rl.charge("unknown", 3);                  // unregistered bucket: no-op, no throw
+    rl.charge("b", 0);                        // non-positive weight: no-op
+    expect(rl.available("b")).toBe(6);
+  });
+
+  it("charge() on a sliding window counts the weight as hits", () => {
+    const c = clock();
+    const rl = new RateLimiter({ now: c.now }).register([{ bucket: "s", scope: "ip", algo: "sliding-window", capacity: 3, windowMs: 1000 }]);
+    rl.charge("s", 2);
+    expect(rl.available("s")).toBe(1);
+    expect(rl.tryAcquire("s")).toBe(true);
+    expect(rl.tryAcquire("s")).toBe(false);   // window full (2 charged + 1 acquired = 3)
+  });
 });

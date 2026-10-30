@@ -79,6 +79,9 @@ class BucketGroup {
     }
     return { ok: false, retryAfterMs: Math.max(...failed.map((p) => p.retryAfterMs)) };
   }
+  /** Spend `weight` without a grant check (tokens may go below zero / the window overfill);
+   *  later grants wait it off. Reuses each limiter's own consume. */
+  charge(weight: number, now: number): void { for (const l of this.lims) l.consume(weight, now); }
   available(now: number): number { return Math.min(...this.lims.map((l) => l.available(now))); }
 }
 
@@ -135,6 +138,16 @@ export class RateLimiter {
       if (r.ok) return;
       await this.sleep(Math.max(1, r.retryAfterMs));
     }
+  }
+
+  /** Force-consume `weight` from a bucket without a grant check — e.g. a relay-repeated read
+   *  charged after the fact, so later reads on the same bucket wait it off. Tokens may go below
+   *  zero; a no-op for an unregistered bucket or a non-positive/non-finite weight. */
+  charge(bucket: string, weight = 1, key?: string): void {
+    if (!Number.isFinite(weight) || weight <= 0) return;
+    const spec = this.specs.get(bucket);
+    if (!spec) return;
+    this.groupFor(bucket, key, spec).charge(weight, this.now());
   }
 
   /** Current spare capacity for a bucket/key (Infinity if unregistered). */
