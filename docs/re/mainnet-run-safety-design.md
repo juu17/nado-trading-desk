@@ -130,13 +130,24 @@ in chat, never logged. The engine client is keyless; only the custody signer sig
 
 ---
 
-## 7. Confirmed at dry-run (not assumed here)
+## 7. Dry-run results — M1, confirmed 2026-10-30 (read-only, no funds)
 
-- Nado mainnet **fee schedule** (taker fee / maker rebate) — refines the cost-per-round and the $25
-  headroom. Structural estimate: at a few bps on ~$100 notional, a clean round costs cents and a
-  stray a fraction of a dollar, so $25 absorbs the full ~90 s N=1 window many times over — to be
-  confirmed, not assumed.
-- Real mainnet **min-notional** and **IMF** per the chosen market — sets per-order size and the exact
-  funding figure.
-- That a **stable mid-spread market** actually exists on mainnet at run time (the book scan proves it
-  before any order; if none appears, the run does not start).
+Ran `packages/adapter-nado/scripts/mainnet-dryrun.mjs` against `api.prod.nado.xyz/gateway/v1`
+(env `inkMainnet`, chainId 57073, status **active**, 97 markets). Confirmed:
+
+- **Fees** (`getSymbols` `makerFeeRate`/`takerFeeRate`): maker `0.0001` (1 bp), taker `0.00035`
+  (3.5 bp). A hedged round (open A-maker+B-taker, close B-maker+A-taker) ≈ 2×(1+3.5) = **9 bp ≈
+  $0.09 on $100 notional**. A ~90 s N=1 window (~90 rounds) ≈ **~$8 in fees** — well under the $25 stop.
+- **IMF** (`longWeightInitial 0.9`): initial margin 0.1 = **~$10 per $100-notional order** (10× max).
+  At N=1 (one open round, `maxConcurrency` 1) peak margin ≈ $10/wallet; ~$100 total funding is ample.
+- **Min-notional** (`minSize`): **$100 USDT0 per order**, uniform across markets (same as testnet).
+- **Deposit endpoint** `0x05ec92D78ED421f3D3Ada77FFdE167106565974E`; clearinghouse
+  `0xD218103918C19D0A10cf35300E4CfAfbD444c5fE`.
+
+🎯 **Market-picker refinement (REQUIRED before M3).** Ranking by widest spread is wrong on mainnet:
+the widest "spreads" are near-empty **FX perps** (GBPUSD shows a ~14%-wide book — a mirage of no
+liquidity) and **equity perps** (wTSLAx/wQQQx… which halt off-hours). The correct target is a
+**liquid crypto perp** with a genuine stable spread (e.g. WETH ~59 t, KBTC ~57 t — real depth, 24/7,
+empty between the touches so improve-the-touch + hard-limit lands A↔B cleanly). The run-time picker
+must filter to 24/7 crypto perps, require a stable spread ≥ headroom+1, and prefer real two-sided
+depth — not the widest raw spread. Until this lands, no M3 run.
