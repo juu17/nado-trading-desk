@@ -47,6 +47,13 @@ export interface ExperimentCampaignInput {
    *  and A then closes by taker, mirroring the open (A maker, B taker). Absent = legacy:
    *  A closes first (maker, then taker), then B by taker. */
   closeMaker?: "B";
+  /** Phase-A self-match open (capacity benchmark, locked decision #2 — A↔B cross IS the fill
+   *  mechanism). Absent/false = the intern's ORGANIC open: A's maker rests until EXTERNAL flow
+   *  fills it, then B hedges (the lifted default; what a no-flow testnet would starve). true =
+   *  once A's maker is acked RESTING, B's taker deliberately CROSSES it (B's size ≤ A's acked
+   *  resting size), so A and B fill each other with no reliance on outside liquidity. Pair with
+   *  closeMaker:"B" so the close mirrors (B rests a reduce maker, A's taker crosses it). */
+  selfCross?: boolean;
   /** Pairs that fell behind the group's leaders may run larger rounds to catch up: up to
    *  this percentage of the normal round (100-200; absent or 100 = off). */
   catchUpPercent?: number;

@@ -1069,6 +1069,11 @@ export class ExperimentCoordinator {
         return;
       case "A_OPEN": {
         const o = orderFor(r, "A_OPEN");
+        // [self-cross] Once A's maker is acked RESTING on the book, fire B to CROSS it (the
+        // A↔B self-match, decision #2) — do NOT wait for an external fill and do NOT cancel A
+        // first (A must still be resting when B crosses). A is reconciled to terminal in B_OPEN
+        // once the cross settles; A is cancelled only on the winding/deadline/early-close path.
+        if (c.selfCross && o && o.state === "DISPATCHED" && !o.cancelState) { await this.phase(c.id, p.id, r.id, "B_OPEN", t); return; }
         // No attempt yet, or the last attempt ended with no fill: (re-)post while the window is open.
         if (!o || (o.state === "TERMINAL" && o.factKnown && BigInt(o.filledX18) === 0n)) {
           if (o && this.now() >= openWindowEnd(r)) { await this.phase(c.id, p.id, r.id, "VERIFYING_FLAT", t); return; }
@@ -1098,7 +1103,11 @@ export class ExperimentCoordinator {
         await this.advanceFinalSource(c, p, r, o, t); return;
       }
       case "B_OPEN": {
-        const a = orderFor(r, "A_OPEN"); if (!a || a.state !== "TERMINAL" || !a.factKnown) refuse("EXPERIMENT_SOURCE_NOT_FINAL");
+        const a = orderFor(r, "A_OPEN");
+        if (!a) refuse("EXPERIMENT_SOURCE_NOT_FINAL");
+        // Organic: B follows A's confirmed EXTERNAL fill (A already TERMINAL). Self-cross: A is
+        // still RESTING (DISPATCHED) and B crosses it now; A is made terminal from the cross below.
+        if (c.selfCross ? (!(a.state === "DISPATCHED" || a.state === "TERMINAL") || (a.state === "DISPATCHED" && !!a.cancelState)) : (a.state !== "TERMINAL" || !a.factKnown)) refuse("EXPERIMENT_SOURCE_NOT_FINAL");
         // B follows A's actual base quantity. A partial or missed IOC (price moved past the
         // slippage bound, thin book) is followed again for the exact remainder at a fresh
         // price; after FOLLOW_ATTEMPTS the round closes both real positions instead of
@@ -1107,9 +1116,26 @@ export class ExperimentCoordinator {
         const open = legs.find(o => o.state !== "TERMINAL");
         if (open) { const fact = await this.poll(c, p, r, open,t); if (!fact || fact.state !== "TERMINAL") return; }
         const fresh = pairById(await this.get(c.id), p.id)!.rounds.find(round => round.id === r!.id)!;
-        const followed = fresh.orders.filter(o => o.role === "B_OPEN" && o.state === "TERMINAL").reduce((n, o) => n + BigInt(o.filledX18), 0n), target = BigInt(a.filledX18);
+        // Overfill guard (invariant #5): B follows A's CONFIRMED size only. Organic = A's actual
+        // external fill; self-cross = A's acked RESTING size (B's taker size ≤ it, never more).
+        const followed = fresh.orders.filter(o => o.role === "B_OPEN" && o.state === "TERMINAL").reduce((n, o) => n + BigInt(o.filledX18), 0n), target = c.selfCross ? BigInt(a.quantityX18) : BigInt(a.filledX18);
         if (followed > target) refuse("EXPERIMENT_FOLLOW_OVERFILLED");
         if (followed === target) {
+          // [self-cross] B has crossed A's resting maker in full, so A's maker is now filled.
+          // Reconcile A to TERMINAL (its fill == the cross) before holding, so VERIFYING_FLAT's
+          // all-orders-terminal + net-zero-per-wallet invariants hold. Not yet settled → wait a tick.
+          if (c.selfCross && a.state !== "TERMINAL") {
+            const af = await this.poll(c, p, r, a, t);
+            if (!af || af.state !== "TERMINAL") {
+              // B's cumulative fill reached A's resting size but A's maker has NOT fully crossed
+              // (external liquidity took B, or a partial cross) and has not reconciled terminal.
+              // Do NOT poll forever: past the follow deadline, early-close both legs — A_CLOSE
+              // withdraws A's still-resting maker (below), then both real positions close to flat.
+              if (this.now() >= followDeadline(r)) await this.change(c.id, current => { if (!this.active(current, t)) return;
+                const round = pairById(current, p.id)!.rounds.find(round => round.id === r!.id)!; round.earlyExitReason = "FOLLOW_TIMEOUT_EXIT"; round.state = "A_CLOSE"; });
+              return;
+            }
+          }
           await this.change(c.id, current => { if (!this.active(current, t)) return; const round = pairById(current, p.id)!.rounds.find(round => round.id === r!.id)!;
             const pairedAt = this.now(); round.state = "HOLDING"; round.pairedAt = pairedAt; round.holdUntil = pairedAt + round.holdMs; }); return;
         }
@@ -1129,6 +1155,22 @@ export class ExperimentCoordinator {
         // B's position is closed by a post-only order kept at the best price; once B is
         // flat (or the maker time is up) A closes by taker, then any B remainder by taker.
         const o = [...r.orders].reverse().find(x => x.role === "B_CLOSE" && x.postOnly && x.state !== "ABORTED_UNSENT");
+        // [self-cross] Mirror the open on the way out: B rests a reduce-only maker, then A's
+        // reduce taker CROSSES it (A_CLOSE). Post B's maker, and as soon as it is acked resting
+        // (or already crossed terminal) hand to A_CLOSE — never wait for external flow or the
+        // maker deadline, never cancel B's maker before A crosses it. A's close path (forceIoc
+        // under closeMaker:"B") then crosses B and closes A's own leg; B_CLOSE reconciles B.
+        if (c.selfCross) {
+          if (o && (o.state === "DISPATCHED" ? !o.cancelState : o.state === "TERMINAL")) { await this.phase(c.id, p.id, r.id, "A_CLOSE", t); return; }
+          if (!o) {
+            const snapshot = await need("b"), qty = abs(signed(snapshot.b.positionX18));
+            if (!qty) { await this.phase(c.id, p.id, r.id, "A_CLOSE", t); return; }
+            if ((r.side === "BUY") !== (signed(snapshot.b.positionX18) < 0n)) refuse("EXPERIMENT_POSITION_DIRECTION_CHANGED");
+            await this.place(c, p, r, "B_CLOSE", String(qty), t, false, true); return;
+          }
+          // o present but not DISPATCHED/TERMINAL (e.g. UNKNOWN): fall through to the organic
+          // recovery below, which polls/cancels it safely.
+        }
         const deadline = (r.holdUntil ?? this.now()) + slotTiming(r.slotMs).closeMakerMs;
         if (!o || o.state === "TERMINAL") {
           // A maker close the exchange refused for its size cannot be re-posted: close by taker.
@@ -1176,6 +1218,12 @@ export class ExperimentCoordinator {
         await this.phase(c.id, p.id, r.id, "B_CLOSE_MAKER", t); return;
       }
       case "A_CLOSE": {
+        // [self-cross] Withdraw A's own still-resting OPEN maker before closing by position. A
+        // fully-crossed A_OPEN is already TERMINAL (no-op on the happy path); but on an early
+        // exit / partial / external cross it is still resting, and leaving it would stall
+        // VERIFYING_FLAT (EXPERIMENT_A_ORDERS_REMAIN / NOT_FLAT). B's close maker is NOT touched
+        // here — A_CLOSE's taker is what crosses it.
+        if (c.selfCross) { const aOpen = orderFor(r, "A_OPEN"); if (aOpen && aOpen.state !== "TERMINAL" && aOpen.state !== "ABORTED_UNSENT") { await this.cancel(c, p, r, aOpen, t); return; } }
         const o = orderFor(r, "A_CLOSE");
         if (!o || o.state === "TERMINAL") { const snapshot = await need("a"), qty = abs(signed(snapshot.a.positionX18)); if (!qty) { if (snapshot.a.openDigests.length) refuse("EXPERIMENT_A_ORDERS_REMAIN"); await this.phase(c.id, p.id, r.id, "B_CLOSE", t); return; }
           if ((r.side === "BUY") !== (signed(snapshot.a.positionX18) > 0n)) refuse("EXPERIMENT_POSITION_DIRECTION_CHANGED");
@@ -1193,6 +1241,14 @@ export class ExperimentCoordinator {
         await this.phase(c.id, p.id, r.id, "A_CLOSE", t); return;
       }
       case "B_CLOSE": {
+        // [self-cross] Resolve B's own close maker first: reconcile it to TERMINAL if A's taker
+        // crossed it (happy path), or withdraw it if A crossed external liquidity instead and it
+        // was left resting (orphan) — then B's remaining position closes by taker below. Avoids a
+        // NOT_FLAT stall on B's own open digest.
+        if (c.selfCross) {
+          const bMaker = r.orders.find(x => x.role === "B_CLOSE" && x.postOnly && x.state === "DISPATCHED" && !x.cancelState);
+          if (bMaker) { const f = await this.poll(c, p, r, bMaker, t); if (!f || f.state !== "TERMINAL") await this.cancel(c, p, r, bMaker, t); return; }
+        }
         const snapshot = await need("ab");
         if (signed(snapshot.a.positionX18) !== 0n || snapshot.a.openDigests.length) refuse("EXPERIMENT_A_NOT_FLAT");
         const qty = abs(signed(snapshot.b.positionX18)), o = orderFor(r, "B_CLOSE");

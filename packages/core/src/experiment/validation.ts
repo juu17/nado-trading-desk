@@ -52,7 +52,7 @@ export function normalizeExperimentInput(input: ExperimentCampaignInput): Experi
     (input.autoRoll !== undefined && typeof input.autoRoll !== "boolean") || (input.groups.length > 1 && !input.autoRoll) ||
     (input.makerTimeoutMs !== undefined && (!time(input.makerTimeoutMs) || input.makerTimeoutMs < 1000 || input.makerTimeoutMs > 300000)) ||
     (input.slotMs !== undefined && input.slotMs !== FAST_SLOT_MS && input.slotMs !== LEGACY_SLOT_MS && input.slotMs !== TURBO_SLOT_MS) ||
-    (input.closeMaker !== undefined && input.closeMaker !== "B") || (input.purpose !== undefined && input.purpose !== "REHEARSAL" && input.purpose !== "SCALED_TEST") ||
+    (input.closeMaker !== undefined && input.closeMaker !== "B") || (input.selfCross !== undefined && typeof input.selfCross !== "boolean") || (input.purpose !== undefined && input.purpose !== "REHEARSAL" && input.purpose !== "SCALED_TEST") ||
     (input.catchUpPercent !== undefined && (!Number.isSafeInteger(input.catchUpPercent) || input.catchUpPercent < 100 || input.catchUpPercent > 200 || !input.sizing)) ||
     (input.costGate !== undefined && !costGateOk(input.costGate)) ||
     // Pair rolling needs the confirmed money route (every hand-over is one of its edges).
