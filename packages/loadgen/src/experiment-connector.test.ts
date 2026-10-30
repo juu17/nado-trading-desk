@@ -27,7 +27,9 @@ type SubmitResult = { digest: string; status: string; raw: unknown };
 function makeDeps(opts: { onSubmit?: (s: unknown) => SubmitResult; fill?: OrderFillSource; book?: { bids: { price: string; size: string }[]; asks: { price: string; size: string }[] }; makerHeadroomTicks?: number; equityFor?: EquitySource; positions?: { side: "long" | "short"; size: string }[] } = {}) {
   let bookReads = 0;
   const gateway = {
-    async getOrderBook() { bookReads++; return { market: "nado:perp:BTC-PERP", bids: opts.book?.bids ?? [{ price: "100", size: "10" }], asks: opts.book?.asks ?? [{ price: "101", size: "10" }], ts: 0, raw: null } as never; },
+    // Default book has a >=2-tick spread (100/103) so A's open maker has a fresh strictly-better
+    // EMPTY tick to rest at; a 1-tick spread now SKIPS the round (EXPERIMENT_NO_EMPTY_TICK, §2).
+    async getOrderBook() { bookReads++; return { market: "nado:perp:BTC-PERP", bids: opts.book?.bids ?? [{ price: "100", size: "10" }], asks: opts.book?.asks ?? [{ price: "103", size: "10" }], ts: 0, raw: null } as never; },
     async submitOrder(signed: unknown) { return (opts.onSubmit ?? (() => ({ digest: "0x" + "d".repeat(64), status: "open", raw: {} })))(signed); },
     async cancelOrders() { return { cancelled: [], raw: {} }; },
     async getPositions() { return (opts.positions ?? []) as never; },
@@ -79,6 +81,35 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
     for (const p of [b1, b3, s1, s3]) { expect(BigInt(p)).toBeGreaterThan(x18(100)); expect(BigInt(p)).toBeLessThan(x18(110)); }
     // Headroom 3 on a 10-tick spread: BUY rests 3 ticks below the ask (107); SELL 3 above the bid (103).
     expect(BigInt(b3)).toBe(x18(107)); expect(BigInt(s3)).toBe(x18(103));
+  });
+
+  it("A's open maker SKIPS the round (EXPERIMENT_NO_EMPTY_TICK) when the spread has no strictly-better tick", async () => {
+    // 1-tick spread (100/101): there is NO tick strictly inside, so A cannot post a fresh,
+    // strictly-better, empty tick without joining a touch → skip the round (§2). Models the live
+    // book collapsing between market selection and A's prepare (the testnet ASTER incident).
+    const d = makeDeps({ book: { bids: [{ price: "100", size: "10" }], asks: [{ price: "101", size: "10" }] } });
+    await expect(d.conn.prepare(campaign(), pair(), request())).rejects.toMatchObject({ notSubmitted: true, message: "EXPERIMENT_NO_EMPTY_TICK" });
+  });
+
+  it("A's open maker skips an OCCUPIED inside tick and rests at the nearest empty one (sole order at its price)", async () => {
+    // Preferred tick (headroom 3 → ask−3 = 107) carries an external order; A steps one tick nearer
+    // the touch to 106 — still strictly inside, and now alone at its price.
+    const book = { bids: [{ price: "100", size: "10" }, { price: "107", size: "5" }], asks: [{ price: "110", size: "10" }] };
+    const prepared = await makeDeps({ book, makerHeadroomTicks: 3 }).conn.prepare(campaign(), pair(), request({ side: "BUY" }));
+    expect(BigInt(prepared.priceX18)).toBe(106n * 10n ** 18n);
+  });
+
+  it("B's open taker is HARD-limited to exactly A's price (no slippage, cannot sweep past A)", async () => {
+    // A rests at 105; B's BUY taker is hard-limited to 105, NOT the slippage-swept best ask (110+),
+    // so it can cross only A and never reaches higher external asks (§2 — bind B to A's price).
+    const d = makeDeps({ book: { bids: [{ price: "100", size: "10" }], asks: [{ price: "110", size: "10" }] } });
+    const aPriceX18 = (105n * 10n ** 18n).toString();
+    const prepared = await d.conn.prepare(campaign(), pair(), request({
+      id: "experiment:c:p1:1:B_OPEN:1", role: "B_OPEN", side: "BUY", postOnly: false, reduceOnly: false,
+      quantityX18: "1000000000000000000", limitPriceX18: aPriceX18,
+    }));
+    expect(prepared.priceX18).toBe(aPriceX18);   // exactly A's price
+    expect(prepared.postOnly).toBe(false);        // a taker (IOC), hard-limited
   });
 
   it("dispatch routes through the ledger and returns the digest on ACK", async () => {

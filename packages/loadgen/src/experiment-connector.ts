@@ -205,23 +205,53 @@ export class NadoExperimentConnector implements ExperimentConnector {
       // Headroom clamp ≥ 1 (0 would price the maker AT the opposite touch → it crosses).
       const headroom = Math.max(1, Math.floor(this.deps.makerHeadroomTicks ?? 1));
       let price: number;
-      if (postOnly) {
-        // Maker rests `headroom` ticks inside the OPPOSITE touch, so it survives the book
-        // tightening up to headroom-1 ticks between this read and submit (else 2008). Clamped to
-        // still improve its NEAR touch (≥ near±tick) so A is alone at the top and the self-cross
-        // taker crosses A, not resting external orders — and never at/through the opposite touch.
+      let hardLimit = false;
+      if (postOnly && request.role === "A_OPEN") {
+        // §2 mechanism: A posts at a FRESH, strictly-better tick EMPTY of external orders (sole
+        // order at its price), never joining an occupied touch. Candidates are the ticks strictly
+        // INSIDE the spread (between the touches); the preferred one is `headroom` ticks off the
+        // opposite touch (so it survives a small tighten) but still ≥ 1 tick better than the near
+        // touch. If the spread has no strictly-inside tick (too tight — the book collapsed since
+        // selection), or every candidate is occupied by an external order, SKIP the round
+        // (EXPERIMENT_NO_EMPTY_TICK → the coordinator sets it aside flat) rather than rest into an
+        // occupied level where B could cross a stranger.
+        const bb = Number(bestBid ?? "0"), ba = Number(bestAsk ?? "0");
+        if (!(bb > 0 && ba > 0 && tick > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID");
+        const bbIdx = Math.round(bb / tick), baIdx = Math.round(ba / tick);
+        if (baIdx - bbIdx < 2) throw new ExperimentUnsentOrderError("EXPERIMENT_NO_EMPTY_TICK"); // no strictly-inside tick
+        const occupied = new Set<number>([...book.bids, ...book.asks].map((l) => Math.round(Number(l.price) / tick)));
+        const pref = Math.min(baIdx - 1, Math.max(bbIdx + 1, request.side === "BUY" ? baIdx - headroom : bbIdx + headroom));
+        const inside = (i: number) => i > bbIdx && i < baIdx;
+        let chosen: number | undefined;
+        for (let d = 0; d <= baIdx - bbIdx; d++) {
+          if (inside(pref - d) && !occupied.has(pref - d)) { chosen = pref - d; break; }         // prefer toward the near touch (safer on a tighten)
+          if (d > 0 && inside(pref + d) && !occupied.has(pref + d)) { chosen = pref + d; break; } // then deeper (more headroom)
+        }
+        if (chosen === undefined) throw new ExperimentUnsentOrderError("EXPERIMENT_NO_EMPTY_TICK");
+        price = chosen * tick;
+      } else if (postOnly) {
+        // B's reduce-only CLOSE maker rests `headroom` ticks inside the opposite touch, clamped to
+        // still improve its near touch — the close mirrors the open (A's taker crosses it).
         const bb = Number(bestBid ?? bestAsk ?? ref), ba = Number(bestAsk ?? bestBid ?? ref);
         price = request.side === "BUY"
           ? Math.min(ba - tick, Math.max(bb + tick, ba - headroom * tick))
           : Math.max(bb + tick, Math.min(ba - tick, bb + headroom * tick));
+      } else if (request.limitPriceX18 !== undefined) {
+        // §2 mechanism: the self-cross taker (B's open) is HARD-limited to EXACTLY A's resting
+        // price — it crosses only A (the sole order at that price) and cannot sweep past A into
+        // external liquidity. Used verbatim (A's price is already grid-aligned); no slippage, no
+        // re-snap (which could round the limit past A's price and re-open the sweep).
+        price = Number(formatUnits(BigInt(request.limitPriceX18), 18));
+        hardLimit = true;
       } else price = request.side === "BUY" ? Number(bestAsk ?? ref) * (1 + slip) : Number(bestBid ?? ref) * (1 - slip);
       if (!(price > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID");
       // Snap to the tick grid, rounding so a TAKER stays aggressive enough to cross (BUY ceil /
       // SELL floor) and a MAKER stays passive, away from crossing (BUY floor / SELL ceil); then
       // format to the tick's decimals, else the sequencer rejects 2000 "price not divisible by
       // the price_increment" (the slip multiplier on a taker price lands off-grid). The maker
-      // offset is already grid-aligned, so its snap is a float-safety no-op. Confirmed live.
-      if (tick > 0) { const up = (request.side === "BUY") !== postOnly; const ticks = up ? Math.ceil(price / tick) : Math.floor(price / tick); price = ticks * tick; }
+      // offset is already grid-aligned, so its snap is a float-safety no-op. The hard-limit taker
+      // is NOT re-snapped — A's price is already on-grid and rounding it up would let B sweep past.
+      if (tick > 0 && !hardLimit) { const up = (request.side === "BUY") !== postOnly; const ticks = up ? Math.ceil(price / tick) : Math.floor(price / tick); price = ticks * tick; }
       if (!(price > 0)) throw new ExperimentUnsentOrderError("EXPERIMENT_BOOK_INVALID"); // a tiny-price snap to 0 escapes the pre-snap guard
       const priceStr = tick > 0 ? price.toFixed(tickDec) : String(price);
       // size: an explicit base qty (a follow/close) stays; else notional → base at this price.

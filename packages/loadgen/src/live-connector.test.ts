@@ -22,7 +22,7 @@ const signer = (addr: string): WalletSigner => ({
 function fakeGateway(): { gw: MultiWalletNadoGateway; seen: string[] } {
   const seen: string[] = [];
   const view = {
-    async getOrderBook() { return { market: "nado:perp:X", bids: [{ price: "100", size: "10" }], asks: [{ price: "101", size: "10" }], ts: 0, raw: null } as never; },
+    async getOrderBook() { return { market: "nado:perp:X", bids: [{ price: "100", size: "10" }], asks: [{ price: "103", size: "10" }], ts: 0, raw: null } as never; },
     async submitOrder() { return { digest: "0x" + "d".repeat(64), status: "open", raw: {} }; },
     async cancelOrders() { return { cancelled: [], raw: {} }; },
     async getPositions() { return []; }, async getOpenOrders() { return []; },

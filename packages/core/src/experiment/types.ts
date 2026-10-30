@@ -188,6 +188,10 @@ export interface ExperimentOrderRequest {
   slippageBps?: number;
   /** Catch-up opening: may be trimmed to the margin the account has, but not below this. */
   minNotionalX18?: string;
+  /** Self-cross taker HARD IOC limit (x18): B crosses at EXACTLY this price (A's resting price),
+   *  so it can cross only A and never sweep past A into external liquidity. Absent = the ordinary
+   *  slippage-bounded taker. The connector uses it verbatim (no slippage, no re-snap past it). */
+  limitPriceX18?: string;
 }
 export interface PreparedExperimentOrder {
   id: string;

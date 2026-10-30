@@ -704,7 +704,7 @@ export class ExperimentCoordinator {
     // scanned no longer exist). Nothing holds a pair back on deposit grounds.
     return false;
   }
-  private async place(c: ExperimentCampaign, p: ExperimentPair, r: ExperimentRound, role: ExperimentOrderRole, quantity: string | undefined, t: Token, forceIoc = false, maker = false): Promise<void> {
+  private async place(c: ExperimentCampaign, p: ExperimentPair, r: ExperimentRound, role: ExperimentOrderRole, quantity: string | undefined, t: Token, forceIoc = false, maker = false, limitPriceX18?: string): Promise<void> {
     const close = role.endsWith("CLOSE"), a = role.startsWith("A_"), side = role === "A_OPEN" || role === "B_CLOSE" ? r.side : opposite(r.side);
     if (!this.active(c, t) || (winding(c, p) && !close)) return;
     // A pair whose deposit is not settled (never credited, or its proof turned unknown or
@@ -725,6 +725,9 @@ export class ExperimentCoordinator {
     const bMaker = role === "B_CLOSE" && maker;
     const request: ExperimentOrderRequest = { id: `experiment:${c.id}:${p.id}:${r.number}:${role}:${attempt}`, role, owner: a ? p.a : p.b, side,
       postOnly: bMaker || (a && !forceIoc), reduceOnly: close };
+    // Self-cross taker HARD limit (§2): bind B's open taker to A's exact resting price so it
+    // crosses only A, never sweeping past A into strangers. Only for a taker (ignored on a maker).
+    if (limitPriceX18 !== undefined && !request.postOnly) request.limitPriceX18 = limitPriceX18;
     if (quantity !== undefined) request.quantityX18 = quantity;
     else if (c.sizing) {
       if (!r.plannedTurnoverX18) refuse("EXPERIMENT_SIZING_INVALID");
@@ -745,6 +748,19 @@ export class ExperimentCoordinator {
       if (role === "B_OPEN" && (code === "EXPERIMENT_BELOW_MINIMUM_NOTIONAL" || code === "EXPERIMENT_MARGIN_INSUFFICIENT")) {
         // B's margin failing is B's shortfall: it counts toward ending a pair that cannot follow.
         await this.sourceBelowMinimumExit(c, p, r, t, code === "EXPERIMENT_MARGIN_INSUFFICIENT"); return;
+      }
+      // §2: A has no fresh, strictly-better tick EMPTY of external orders to rest at (the spread
+      // is too tight, or every candidate inside tick is occupied) — SKIP this round rather than
+      // join an occupied touch. Nothing was placed (the throw precedes any claim), so the round is
+      // set aside flat (REPRICE_EXHAUSTED_EXIT) and the next one opens; a persistent run of these
+      // ends the pair via the round-open gate's "unpriceable" backstop (3 in a row).
+      if (role === "A_OPEN" && code === "EXPERIMENT_NO_EMPTY_TICK" && !r.orders.some(o => o.state !== "ABORTED_UNSENT")) {
+        await this.change(c.id, current => { if (!this.active(current, t)) return;
+          const round = current.groups.flatMap(g => g.pairs).find(pair => pair.id === p.id)!.rounds.find(round => round.id === r.id)!;
+          if (round.orders.some(o => o.state !== "ABORTED_UNSENT")) return;
+          if (round.state === "A_OPEN" || round.state === "WAITING_OPEN") round.earlyExitReason = "REPRICE_EXHAUSTED_EXIT"; });
+        await this.phase(c.id, p.id, r.id, "VERIFYING_FLAT", t);
+        return;
       }
       // Nothing was sent for this round. The connector already lifts a sized opening to the
       // market minimum, so a refusal here means even that minimum is out of reach (the
@@ -1211,7 +1227,8 @@ export class ExperimentCoordinator {
         }
         const late = this.now() >= followDeadline(r);
         if (!late && fresh.orders.filter(o => o.role === "B_OPEN" && o.state !== "ABORTED_UNSENT").length < FOLLOW_ATTEMPTS && !winding(c, p)) {
-          await this.place(c, p, fresh, "B_OPEN", String(target - followed), t); return;
+          // Self-cross: hard-limit B's taker to A's exact resting price (cross only A, §2).
+          await this.place(c, p, fresh, "B_OPEN", String(target - followed), t, false, false, c.selfCross ? a.priceX18 : undefined); return;
         }
         await this.change(c.id, current => { if (!this.active(current, t)) return; const round = pairById(current, p.id)!.rounds.find(round => round.id === r!.id)!;
           round.earlyExitReason = late ? "FOLLOW_TIMEOUT_EXIT" : "FOLLOWER_INCOMPLETE_EXIT"; round.state = "A_CLOSE"; }); return;

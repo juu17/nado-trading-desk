@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { emptyOperations, type DeskOperations, type OperationsStore } from "../funding/types.js";
 import { TURBO_SLOT_MS } from "./timing.js";
 import { ExperimentCoordinator } from "./coordinator.js";
+import { ExperimentUnsentOrderError } from "./types.js";
 import type { ExperimentCampaign, ExperimentCampaignInput, ExperimentConnector, ExperimentOrder, ExperimentOrderFact, ExperimentOrderRequest, PreparedExperimentOrder } from "./types.js";
 
 const address = (n: number) => "0x" + n.toString(16).padStart(40, "0");
@@ -22,9 +23,9 @@ class Store implements OperationsStore<ExperimentCampaign> {
 // A minimal single-product CLOB: post-only orders REST; a taker CROSSES the best resting
 // maker of the opposite side, filling min(taker, maker-remaining) and moving both positions.
 // This is what makes the A↔B self-match real in the test.
-function selfCrossFixture(opts: { externalLiquidity?: boolean; bOpenPrepareFails?: boolean; closeMakerRefuses?: boolean } = {}) {
+function selfCrossFixture(opts: { externalLiquidity?: boolean; bOpenPrepareFails?: boolean; closeMakerRefuses?: boolean; noEmptyTickRounds?: number } = {}) {
   const store = new Store();
-  let now = 0, seq = 1;
+  let now = 0, seq = 1, aOpenAttempts = 0;
   const positions = new Map<string, bigint>();
   // digest -> live order record
   const orders = new Map<string, { owner: string; side: "BUY" | "SELL"; qty: bigint; filled: bigint; postOnly: boolean; resting: boolean; terminal: boolean; productId: number }>();
@@ -45,6 +46,9 @@ function selfCrossFixture(opts: { externalLiquidity?: boolean; bOpenPrepareFails
     prepare: async (c, pair, request) => {
       // Edge: B's follow is refused at prepare (margin / below-min) — the coordinator early-exits.
       if (opts.bOpenPrepareFails && request.role === "B_OPEN") throw new Error("EXPERIMENT_BELOW_MINIMUM_NOTIONAL");
+      // §2: A finds no fresh, strictly-better EMPTY tick for the first `noEmptyTickRounds` rounds
+      // (the spread is too tight) → the round is skipped (set aside flat), the next one opens.
+      if (opts.noEmptyTickRounds && request.role === "A_OPEN" && ++aOpenAttempts <= opts.noEmptyTickRounds) throw new ExperimentUnsentOrderError("EXPERIMENT_NO_EMPTY_TICK");
       requests.set(request.id, request);
       const qty = request.quantityX18 ?? "100"; // A_OPEN uses notional default → 100; follows/closes pass an explicit qty
       return { ...request, mode: c.mode, chainId: c.chainId, productId: c.productId, digest: "0x" + (seq++).toString(16).padStart(64, "0"),
@@ -172,6 +176,24 @@ describe("self-cross failure paths close cleanly (no stall, no stranded maker)",
     const aOpen = round.orders.find((o) => o.role === "A_OPEN")!;
     expect(["TERMINAL", "ABORTED_UNSENT"]).toContain(aOpen.state);
     expect(round.orders.every((o) => o.state === "TERMINAL" || o.state === "ABORTED_UNSENT")).toBe(true);
+  });
+
+  it("skips the round when A has no empty strictly-better tick (§2), then opens the next round", async () => {
+    // Round 1: A_OPEN finds no empty tick (spread too tight) → nothing placed, the round is set
+    // aside flat (REPRICE_EXHAUSTED_EXIT); the pair stays ACTIVE and opens round 2 (A posts
+    // normally). No position is ever opened on the skipped round.
+    const x = selfCrossFixture({ noEmptyTickRounds: 1 });
+    await x.init();
+    for (let i = 0; i < 40 && (await x.current()).groups[0]!.pairs[0]!.rounds.length < 2; i++) { await x.step(1); x.now += 10; }
+    const pairState = (await x.current()).groups[0]!.pairs[0]!;
+    const r1 = pairState.rounds[0]!;
+    expect(r1.earlyExitReason).toBe("REPRICE_EXHAUSTED_EXIT"); // set aside, not a halt / one-sided pause
+    expect(r1.orders.length).toBe(0);                          // truly nothing placed (skip precedes any claim)
+    expect(r1.state).toBe("COMPLETED");
+    expect(pairState.rounds.length).toBeGreaterThanOrEqual(2); // the next round opened
+    expect(pairState.state).toBe("ACTIVE");
+    expect(x.positions.get(address(1)) ?? 0n).toBe(0n);
+    expect(x.positions.get(address(2)) ?? 0n).toBe(0n);
   });
 
   it("cancel-on-timeout: A's maker bailed reduce-only when B has not crossed it within makerCrossTimeoutMs", async () => {
