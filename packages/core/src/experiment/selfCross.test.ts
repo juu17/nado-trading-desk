@@ -22,7 +22,7 @@ class Store implements OperationsStore<ExperimentCampaign> {
 // A minimal single-product CLOB: post-only orders REST; a taker CROSSES the best resting
 // maker of the opposite side, filling min(taker, maker-remaining) and moving both positions.
 // This is what makes the A↔B self-match real in the test.
-function selfCrossFixture(opts: { externalLiquidity?: boolean; bOpenPrepareFails?: boolean } = {}) {
+function selfCrossFixture(opts: { externalLiquidity?: boolean; bOpenPrepareFails?: boolean; closeMakerRefuses?: boolean } = {}) {
   const store = new Store();
   let now = 0, seq = 1;
   const positions = new Map<string, bigint>();
@@ -52,9 +52,14 @@ function selfCrossFixture(opts: { externalLiquidity?: boolean; bOpenPrepareFails
     },
     dispatch: async (_c, prepared, allowed) => {
       if (!allowed()) throw Error("STOPPED");
+      // Edge: B's post-only reduce-only CLOSE maker is refused as post-only-would-cross (2008) —
+      // a never-placed refusal. The coordinator must fall to the taker close (A_CLOSE) and still
+      // flatten B, never hang on a lookup of the never-placed order. Its reduce-only takers then
+      // close against the (external) book, so the round can reach flat.
+      if (opts.closeMakerRefuses && prepared.reduceOnly && prepared.postOnly) throw new Error("ORDER_REFUSED_2008");
       const rec = { owner: prepared.owner, side: prepared.side as "BUY" | "SELL", qty: BigInt(prepared.quantityX18), filled: 0n, postOnly: prepared.postOnly, resting: prepared.postOnly, terminal: false, productId: prepared.productId };
       orders.set(prepared.digest, rec);
-      if (!prepared.postOnly && opts.externalLiquidity) {
+      if (!prepared.postOnly && (opts.externalLiquidity || (opts.closeMakerRefuses && prepared.reduceOnly))) {
         // Edge: the taker crosses bottomless EXTERNAL liquidity (other participants), filling
         // fully WITHOUT touching A's/B's resting self-cross maker — so that maker is stranded.
         rec.filled = rec.qty; move(rec.owner, rec.side, rec.qty); rec.terminal = true;
@@ -166,6 +171,24 @@ describe("self-cross failure paths close cleanly (no stall, no stranded maker)",
     expect(x.positions.get(address(2)) ?? 0n).toBe(0n);
     const aOpen = round.orders.find((o) => o.role === "A_OPEN")!;
     expect(["TERMINAL", "ABORTED_UNSENT"]).toContain(aOpen.state);
+    expect(round.orders.every((o) => o.state === "TERMINAL" || o.state === "ABORTED_UNSENT")).toBe(true);
+  });
+
+  it("B's post-only close maker refused (2008) falls to the taker close and still flattens B, no hang", async () => {
+    // closeMaker:"B" posts a SECOND post-only maker every round (decision #2's mirror). Under a
+    // moving book it can be refused post-only-would-cross just like A's open. The refusal must
+    // resolve locally to terminal/0 (never a lookup of the never-placed order → no transient
+    // EXPERIMENT_LOOKUP_UNKNOWN hang) and the close must fall to the taker, flattening B.
+    const x = selfCrossFixture({ closeMakerRefuses: true });
+    await x.init();
+    for (let i = 0; i < 60 && (await x.current()).groups[0]!.pairs[0]!.rounds[0]?.state !== "COMPLETED"; i++) await x.step(1);
+    const round = (await x.current()).groups[0]!.pairs[0]!.rounds[0]!;
+    expect(round.state).toBe("COMPLETED");                 // did NOT hang in B_CLOSE_MAKER
+    expect(x.positions.get(address(1)) ?? 0n).toBe(0n);
+    expect(x.positions.get(address(2)) ?? 0n).toBe(0n);    // B was flattened by the taker fallback
+    const closeMaker = round.orders.find((o) => o.role === "B_CLOSE" && o.postOnly)!;
+    expect(closeMaker).toMatchObject({ state: "TERMINAL", filledX18: "0", errorCode: "ORDER_REFUSED_2008" });
+    expect(round.orders.some((o) => o.role === "A_CLOSE" && !o.postOnly)).toBe(true);
     expect(round.orders.every((o) => o.state === "TERMINAL" || o.state === "ABORTED_UNSENT")).toBe(true);
   });
 });

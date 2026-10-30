@@ -259,8 +259,11 @@ export interface ExperimentRound {
   holdUntil?: number;
   completedAt?: number;
   /** SOURCE_BELOW_MINIMUM_EXIT: A filled too little to follow. FOLLOWER_INCOMPLETE_EXIT: B could
-   *  not match A's fill within its attempts, so both real positions were closed early. */
-  earlyExitReason?: "SOURCE_BELOW_MINIMUM_EXIT" | "FOLLOWER_INCOMPLETE_EXIT" | "FOLLOW_TIMEOUT_EXIT" | "PAUSE_FLATTEN_EXIT";
+   *  not match A's fill within its attempts, so both real positions were closed early.
+   *  REPRICE_EXHAUSTED_EXIT: A's post-only maker was refused as never-placed (post-only would
+   *  cross, off-tick, out of band, late/expired) REPRICE_ATTEMPTS times in this round, so the
+   *  round is set aside flat (nothing was placed) and the next one opens. */
+  earlyExitReason?: "SOURCE_BELOW_MINIMUM_EXIT" | "FOLLOWER_INCOMPLETE_EXIT" | "FOLLOW_TIMEOUT_EXIT" | "PAUSE_FLATTEN_EXIT" | "REPRICE_EXHAUSTED_EXIT";
   /** Sizing mode: planned open + close turnover of this round, fixed when the round is drawn. */
   plannedTurnoverX18?: string;
   /** Catch-up round: the turnover it would have had without the boost (the opening may be

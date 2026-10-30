@@ -156,7 +156,7 @@ export function validateExperiments(s: DeskOperations<ExperimentCampaign>): void
             !["WAITING_OPEN", "A_OPEN", "CANCEL_A_OPEN", "B_OPEN", "HOLDING", "B_CLOSE_MAKER", "CANCEL_B_CLOSE_MAKER", "A_CLOSE", "CANCEL_A_CLOSE", "B_CLOSE", "VERIFYING_FLAT", "COMPLETED"].includes(r.state) ||
             (r.holdUntil !== undefined && (!time(r.pairedAt) || r.holdUntil !== r.pairedAt! + r.holdMs)) ||
             (r.completedAt !== undefined && !time(r.completedAt)) ||
-            (r.earlyExitReason !== undefined && !["SOURCE_BELOW_MINIMUM_EXIT", "FOLLOWER_INCOMPLETE_EXIT", "FOLLOW_TIMEOUT_EXIT", "PAUSE_FLATTEN_EXIT"].includes(r.earlyExitReason)) ||
+            (r.earlyExitReason !== undefined && !["SOURCE_BELOW_MINIMUM_EXIT", "FOLLOWER_INCOMPLETE_EXIT", "FOLLOW_TIMEOUT_EXIT", "PAUSE_FLATTEN_EXIT", "REPRICE_EXHAUSTED_EXIT"].includes(r.earlyExitReason)) ||
             (r.plannedTurnoverX18 !== undefined && (!c.sizing || rawAmount(r.plannedTurnoverX18) <= 0n)) ||
             (r.unboostedTurnoverX18 !== undefined && (r.plannedTurnoverX18 === undefined || rawAmount(r.unboostedTurnoverX18) <= 0n || rawAmount(r.unboostedTurnoverX18) > BigInt(r.plannedTurnoverX18))) ||
             (r.result !== undefined && (r.state !== "COMPLETED" || !signed(r.result.aPnlX18) || !signed(r.result.bPnlX18))) ||

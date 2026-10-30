@@ -19,6 +19,18 @@ type Token = { epoch: number; generation: number };
 const opposite = (side: "BUY" | "SELL") => side === "BUY" ? "SELL" : "BUY";
 /** IOC follow attempts for the source's actual fill before the round is closed early. */
 export const FOLLOW_ATTEMPTS = 6;
+/** Market-state / price refusals the sequencer RECEIVED and rejected WITHOUT placing the order
+ *  (provably never placed — no position, nothing resting): post-only would cross (2008), an
+ *  off-tick / invalid price (2000), a price outside the band (2007), a late recv (2011), an
+ *  expired send (2004). A's post-only maker re-prices and retries these; after REPRICE_ATTEMPTS
+ *  in one round the book is persistently against it and the round is set aside flat
+ *  (REPRICE_EXHAUSTED_EXIT). Margin/health (2006/2036/2092) keep their 3-strike handling,
+ *  below-minimum size (2003/2094) keep theirs, and market-disabled (2069) / at-OI-cap (2070)
+ *  end the pair — so NONE of those are in this set. */
+export const REPRICE_REFUSAL_CODES: ReadonlySet<string> = new Set(["2000", "2004", "2007", "2008", "2011"]);
+/** A's maker may re-price past this many classified never-placed refusals in one round before
+ *  the round is set aside flat (the book is persistently adverse — a race-loss, not a halt). */
+export const REPRICE_ATTEMPTS = 5;
 /** B must have followed by the end of the round's slot (5 or 3 minutes, see timing.ts); a
  *  later follow (e.g. after a long pause) would no longer mirror A, so A's position is
  *  closed instead. */
@@ -798,10 +810,27 @@ export class ExperimentCoordinator {
       }
       if(!this.active(await this.get(c.id),t))return;
       await this.change(c.id, current => { const o = find(current); if (o.state !== "TERMINAL") o.state = "UNKNOWN"; if (refused || /^ORDER_REJECTED_\d+$/.test(message)) o.errorCode = message; });
-      // An explicit exchange refusal (never placed) is resolved by the original-request
-      // lookup at once, so the round re-prices on the next tick instead of pausing.
+      // A classified exchange refusal (ORDER_REFUSED_<code>) is POSITIVE proof the order never
+      // reached the book — no position, nothing resting — for every role. Resolve it LOCALLY to
+      // terminal / zero-fill (the refusal verdict IS the fact), instead of the original-request
+      // lookup: on a live venue that lookup answers "not found -> not observable" (known:false),
+      // which cannot confirm a never-placed order and would hang the round on a transient
+      // EXPERIMENT_LOOKUP_UNKNOWN. The downstream re-post / margin / size / close-maker handlers
+      // then run as designed. Double-place protection is intact: ONLY a classified refusal
+      // resolves locally; a genuine unknown (no code) still takes the UNKNOWN + lookup + pause
+      // gate below.
       if (refused) {
-        await this.poll(c, p, r, find(await this.get(c.id)),t);
+        await this.applyFact(c.id, p.id, r.id, prepared.id, { digest: prepared.digest, identityMatches: true, known: true, terminal: true, filledX18: "0", quoteFilledX18: "0", feePaidX18: "0", observedAt: this.now() });
+        if (!this.active(await this.get(c.id), t)) return;
+        // A market the sequencer has disabled (2069) or that is at its open-interest cap and
+        // accepting closes only (2070) cannot be OPENED at any price, so re-pricing an open just
+        // spins. 2069 (nothing trades, closes refused too) winds the pair down with a
+        // market-unavailable reason -- a 2069 set-aside can therefore be non-flat (the operator
+        // is alerted after the review threshold). 2070 on A's open leaves nothing open, so the
+        // pair winds down flat; 2070 on B's follow (A already holds a position and closes ARE
+        // accepted) closes A at once rather than sitting unhedged through the wind-down.
+        if (refused[1] === "2069" || (refused[1] === "2070" && role === "A_OPEN")) { await this.pause(c.id, p.id, "EXPERIMENT_MARKET_UNAVAILABLE", t); return; }
+        if (refused[1] === "2070" && role === "B_OPEN") { await this.sourceBelowMinimumExit(c, p, r, t, true); return; }
         // A's opening refused three times in a row for margin/health is not price noise:
         // this round ends empty (nothing is open) and the pair pauses with that reason; the
         // next round counts afresh. Closes and B's follow never pause here: closes retry
@@ -828,6 +857,25 @@ export class ExperimentCoordinator {
           const legs = (await this.get(c.id)).groups.flatMap(g => g.pairs).flatMap(p => p.rounds).find(x => x.id === r.id)!.orders.filter(o => o.role === role && !o.postOnly && o.state !== "ABORTED_UNSENT").slice(-3);
           if (legs.length === 3 && legs.every(o => o.errorCode === message && o.state === "TERMINAL" && o.filledX18 === "0"))
             await this.pause(c.id, p.id, "EXPERIMENT_CLOSE_BELOW_MINIMUM",t);
+        }
+        // A's post-only maker racing a moving book (post-only would cross, off-tick, out of
+        // band, late/expired): its terminal zero-fill leg makes the A_OPEN handler re-post
+        // (re-price) on the next tick within the open window. Bound it -- once this round has
+        // burned REPRICE_ATTEMPTS such refusals the book is persistently against the maker, so
+        // set the round aside flat (nothing was ever placed; both wallets are untouched) and let
+        // the next round open; that lost round is a race-loss datum, not a halt or one-sided
+        // pause. Counted on the refusal errorCode, so an ordinary unfilled-maker re-post (which
+        // carries no errorCode) never trips it. A persistent run of these set-aside rounds is
+        // ended at the pair level by the round-open gate's "unpriceable" backstop.
+        if (role === "A_OPEN" && REPRICE_REFUSAL_CODES.has(refused[1]!)) {
+          const round = (await this.get(c.id)).groups.flatMap(g => g.pairs).flatMap(q => q.rounds).find(x => x.id === r.id);
+          const raced = round?.orders.filter(o => o.role === "A_OPEN" && o.state === "TERMINAL" && REPRICE_REFUSAL_CODES.has(/^ORDER_REFUSED_(\d+)$/.exec(o.errorCode ?? "")?.[1] ?? "")).length ?? 0;
+          if (raced >= REPRICE_ATTEMPTS) {
+            await this.change(c.id, current => { if (!this.active(current, t)) return;
+              const rd = current.groups.flatMap(g => g.pairs).find(pair => pair.id === p.id)!.rounds.find(round => round.id === r.id)!;
+              if (rd.state === "A_OPEN" || rd.state === "WAITING_OPEN") rd.earlyExitReason = "REPRICE_EXHAUSTED_EXIT"; });
+            await this.phase(c.id, p.id, r.id, "VERIFYING_FLAT", t);
+          }
         }
         return;
       }
@@ -976,6 +1024,10 @@ export class ExperimentCoordinator {
       // A's opening refused for margin in three rounds in a row (each round ends with no
       // trade): this pair's size does not fit its margin; it ends instead of cycling forever.
       const unfundable = !done && recent.length === 3 && recent.every(x => x.orders.length > 0 && x.orders.every(o => o.role === "A_OPEN" && o.filledX18 === "0" && /^ORDER_REFUSED_(2006|2036|2092)$/.test(o.errorCode ?? "")));
+      // A's maker could not get a clean post in three rounds in a row (each set aside after its
+      // reprice cap): the book is persistently against this pair at this size, so it ends with
+      // its reason instead of churning fresh zero-fill rounds (and holding up the group) forever.
+      const unpriceable = !done && recent.length === 3 && recent.every(x => x.earlyExitReason === "REPRICE_EXHAUSTED_EXIT");
       await this.change(c.id, current => { if (!this.active(current, t)) return; const pair = pairById(current, p.id)!;
         pair.lastFlatAt = this.now();
         // Pause-and-flatten: this pair is flat; it starts nothing new until resumed.
@@ -986,6 +1038,7 @@ export class ExperimentCoordinator {
         else if (exhausted) { pair.state = "COMPLETED"; pair.errorCode = "EXPERIMENT_CAPITAL_TOO_SMALL"; }
         else if (unfollowable) { pair.state = "COMPLETED"; pair.errorCode = "EXPERIMENT_FOLLOW_REPEATEDLY_FAILED"; }
         else if (unfundable) { pair.state = "COMPLETED"; pair.errorCode = "EXPERIMENT_MARGIN_REPEATEDLY_REFUSED"; }
+        else if (unpriceable) { pair.state = "COMPLETED"; pair.errorCode = "EXPERIMENT_MARKET_UNPRICEABLE"; }
         else { pair.state = "ACTIVE"; pair.rounds.push(this.makeRound(current, pair)); } }); return;
     }
     if (winding(c, p) && !["A_CLOSE", "CANCEL_A_CLOSE", "B_CLOSE", "VERIFYING_FLAT"].includes(r.state)) {
@@ -1073,6 +1126,11 @@ export class ExperimentCoordinator {
         // A↔B self-match, decision #2) — do NOT wait for an external fill and do NOT cancel A
         // first (A must still be resting when B crosses). A is reconciled to terminal in B_OPEN
         // once the cross settles; A is cancelled only on the winding/deadline/early-close path.
+        // INVARIANT (safety): this DISPATCHED guard MUST stay ahead of the re-post below. B_OPEN
+        // crosses for A's REQUESTED size (a.quantityX18, not a.filledX18), so firing B against a
+        // refused A (now terminal, filled 0) would open a naked B leg. A refused A never reaches
+        // DISPATCHED here (the dispatch catch resolves it straight to TERMINAL), so B stays held
+        // and the re-post below re-prices A instead; keep this ordering.
         if (c.selfCross && o && o.state === "DISPATCHED" && !o.cancelState) { await this.phase(c.id, p.id, r.id, "B_OPEN", t); return; }
         // No attempt yet, or the last attempt ended with no fill: (re-)post while the window is open.
         if (!o || (o.state === "TERMINAL" && o.factKnown && BigInt(o.filledX18) === 0n)) {

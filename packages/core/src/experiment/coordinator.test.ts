@@ -3,7 +3,7 @@ import { emptyOperations, type DeskOperations, type OperationsStore } from "../f
 import { validateDeskOperations } from "../funding/journal.js";
 import { OrderLedger } from "../funding/order-ledger.js";
 import { makeWalletUsePlan } from "../funding/wallet-use-plan.js";
-import { ExperimentCoordinator } from "./coordinator.js";
+import { ExperimentCoordinator, REPRICE_ATTEMPTS } from "./coordinator.js";
 import { experimentRoutePlanSha256 } from "./route.js";
 // Phase-A port: the funding→experiment circular edge is cut, so the DEEP experiment-slot
 // validation (which the funding journal did in lucklab) now lives in the experiment layer —
@@ -829,6 +829,73 @@ describe("review fixes: follow margin, refused maker close, interrupted flatten"
     expect(p.rounds[0]!.state).not.toBe("COMPLETED");
     expect(p.rounds[0]!.orders.filter(o => o.role === "A_CLOSE" && !o.postOnly)).toHaveLength(3);
     expect(x.positions.get(address(1))).not.toBe(0n);
+  });
+  // A classified never-placed refusal (ORDER_REFUSED_<code>) is resolved LOCALLY to terminal /
+  // zero-fill from the verdict itself — NOT via connector.lookup, which on the live venue cannot
+  // observe a never-placed order (known:false) and would hang the round on a transient
+  // EXPERIMENT_LOOKUP_UNKNOWN. These cases pin the local resolve, the A-maker reprice cap, the
+  // cross-round backstop, and the market-disabled / at-OI exits.
+  it("resolves a classified refusal from the verdict alone, never calling lookup (the live not-found hang is bypassed)", async () => {
+    const x = fixture(), dispatch = x.connector.dispatch, lookup = x.connector.lookup; let refused: string | undefined;
+    x.connector.dispatch = async (c, prepared, allowed) => { if (!refused && prepared.postOnly) { refused = prepared.digest; throw new Error("ORDER_REFUSED_2008"); } return dispatch(c, prepared, allowed); };
+    // The live failure mode made explicit: looking up the refused (never-placed) digest THROWS.
+    // If the fix regressed to poll(), this would pause EXPERIMENT_LOOKUP_UNKNOWN and the test fails.
+    x.connector.lookup = async (c, o) => { if (o.digest === refused) throw new Error("LOOKUP_MUST_NOT_BE_CALLED_FOR_A_REFUSAL"); return lookup(c, o); };
+    await x.init(); await x.step(2);
+    expect((await x.current()).groups[0]!.pairs[0]!.state).not.toBe("PAUSED");
+    const c = await x.until(c => c.groups[0]!.pairs[0]!.rounds[0]?.state === "HOLDING");
+    const aOpens = c.groups[0]!.pairs[0]!.rounds[0]!.orders.filter(o => o.role === "A_OPEN");
+    expect(aOpens[0]).toMatchObject({ state: "TERMINAL", filledX18: "0", errorCode: "ORDER_REFUSED_2008" });
+    expect(BigInt(aOpens.at(-1)!.filledX18)).toBeGreaterThan(0n);
+  });
+  it("re-prices a non-2008 market refusal (off-tick 2000) and the next post fills, without pausing", async () => {
+    const x = fixture(), dispatch = x.connector.dispatch; let refused: string | undefined;
+    x.connector.dispatch = async (c, prepared, allowed) => { if (!refused && prepared.postOnly) { refused = prepared.digest; throw new Error("ORDER_REFUSED_2000"); } return dispatch(c, prepared, allowed); };
+    await x.init(); await x.step(2);
+    expect((await x.current()).groups[0]!.pairs[0]!.state).not.toBe("PAUSED");
+    const c = await x.until(c => c.groups[0]!.pairs[0]!.rounds[0]?.state === "HOLDING");
+    expect(c.groups[0]!.pairs[0]!.rounds[0]!.orders.filter(o => o.role === "A_OPEN").map(o => [o.state, o.filledX18])).toEqual([["TERMINAL", "0"], ["TERMINAL", "100"]]);
+  });
+  it("sets the round aside at the reprice cap, counts only refusal legs, and ends the pair after a persistent run", async () => {
+    const x = fixture(), dispatch = x.connector.dispatch;
+    x.connector.dispatch = async (c, prepared, allowed) => { if (prepared.postOnly) throw new Error("ORDER_REFUSED_2008"); return dispatch(c, prepared, allowed); };
+    await x.init();
+    const c = await x.until(c => c.groups[0]!.pairs[0]!.state === "COMPLETED", 150);
+    const pair = c.groups[0]!.pairs[0]!;
+    // Ended by the cross-round backstop (NOT paused, NOT the margin "refused repeatedly" path), flat.
+    expect(pair.state).toBe("COMPLETED");
+    expect(pair.errorCode).toBe("EXPERIMENT_MARKET_UNPRICEABLE");
+    expect(x.positions.get(address(1)) ?? 0n).toBe(0n); expect(x.positions.get(address(2)) ?? 0n).toBe(0n);
+    // Three rounds in a row set aside, each after EXACTLY the cap of refusal-errorCode legs
+    // (one fewer would still be re-pricing, not exiting), each flat with no fills.
+    const setAside = pair.rounds.filter(r => r.earlyExitReason === "REPRICE_EXHAUSTED_EXIT");
+    expect(setAside).toHaveLength(3);
+    for (const r of setAside) {
+      const aOpens = r.orders.filter(o => o.role === "A_OPEN");
+      expect(aOpens).toHaveLength(REPRICE_ATTEMPTS);
+      expect(aOpens.every(o => o.state === "TERMINAL" && o.filledX18 === "0" && o.errorCode === "ORDER_REFUSED_2008")).toBe(true);
+    }
+  });
+  it("ends the pair on a market-disabled (2069) or at-OI (2070) refusal of A's open instead of re-pricing forever", async () => {
+    for (const code of ["2069", "2070"]) {
+      const x = fixture(), dispatch = x.connector.dispatch;
+      x.connector.dispatch = async (c, prepared, allowed) => { if (prepared.postOnly) throw new Error(`ORDER_REFUSED_${code}`); return dispatch(c, prepared, allowed); };
+      await x.init();
+      const pair = (await x.until(c => c.groups[0]!.pairs[0]!.state === "PAUSED")).groups[0]!.pairs[0]!;
+      expect(pair.errorCode).toBe("EXPERIMENT_MARKET_UNAVAILABLE");
+      expect(pair.rounds[0]!.orders.filter(o => o.role === "A_OPEN").every(o => o.state === "TERMINAL" && o.filledX18 === "0")).toBe(true);
+    }
+  });
+  it("a 2070 (at open-interest cap) refusal of B's follow closes A at once rather than leaving it unhedged", async () => {
+    const x = fixture(), dispatch = x.connector.dispatch, lookup = x.connector.lookup, refused = new Set<string>();
+    x.connector.dispatch = async (c, prepared, allowed) => { if (!prepared.postOnly && !prepared.reduceOnly) { refused.add(prepared.digest); throw new Error("ORDER_REFUSED_2070"); } return dispatch(c, prepared, allowed); };
+    x.connector.lookup = async (c, o) => refused.has(o.digest) ? { digest: o.digest, identityMatches: true, known: true, terminal: true, filledX18: "0", quoteFilledX18: "0", feePaidX18: "0", observedAt: x.now } : lookup(c, o);
+    await x.init();
+    const c = await x.until(c => c.groups[0]!.pairs[0]!.rounds[0]?.state === "COMPLETED");
+    const round = c.groups[0]!.pairs[0]!.rounds[0]!;
+    expect(round.earlyExitReason).toBe("FOLLOWER_INCOMPLETE_EXIT"); // A closed via the exit path, not left open
+    expect(x.positions.get(address(1)) ?? 0n).toBe(0n);
+    expect(c.groups[0]!.pairs[0]!.state).not.toBe("PAUSED");
   });
   it("a safe exit during a group step that is still waiting carries that step to its end and completes", async () => {
     const x = fixture({ autoRoll: true, groups: [{ id: "g1", pairs: [{ id: "p1", a: address(1), b: address(2) }] }, { id: "g2", pairs: [{ id: "p2", a: address(3), b: address(4) }] }] });
