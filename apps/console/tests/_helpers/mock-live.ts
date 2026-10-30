@@ -46,7 +46,7 @@ export async function mockDda(page: Page, address: string): Promise<void> {
   );
 }
 
-export type RelayQuery = { type?: string; subaccount?: string; sender?: string; product_id?: number; product_ids?: number[] };
+export type RelayQuery = { type?: string; subaccount?: string; sender?: string; address?: string; product_id?: number; product_ids?: number[] };
 export interface RelayOpts {
   onQuery?: (q: RelayQuery) => void;
   /** Per-subaccount open-order count the mock reports, keyed by LOWERCASED subaccount hex. A live
@@ -55,7 +55,19 @@ export interface RelayOpts {
   /** Hold every order-book (`market_liquidity`) reply until this settles — lets a test land the book
    *  at a moment of its choosing (e.g. mid-click) to prove the drawer layout doesn't shift. */
   bookGate?: Promise<unknown>;
+  /** Observe each WRITE forwarded to `/execute` (place_order / withdraw_collateral / cancel_orders) with
+   *  its inner signed payload — the fan-out + withdraw specs assert the real in-tab submits reached the
+   *  relay (e.g. 3 place_orders with varying `order.amount` = per-wallet size jitter). */
+  onExecute?: (kind: string, payload: Record<string, unknown>) => void;
+  /** Called per `place_order` submit: return true to answer with a sequencer-REJECTION envelope (status
+   *  != "success"), which the live gateway's assertOk turns into a thrown error → a FAILED bulk job. A live
+   *  reference the retry spec flips to false before pressing "Retry N failed". */
+  placeOrderFails?: () => boolean;
 }
+
+// The write actions the keyless relay forwards to the sequencer's `/execute` (ALLOW set in the route). An
+// execute body is `{ <kind>: payload }` (never a type-tagged query), so the inner key names the action.
+const EXECUTE_KINDS = ["place_order", "withdraw_collateral", "cancel_orders", "liquidate_subaccount"] as const;
 
 // A subaccount summary's account health is read unconditionally as a 3-tuple [initial, maintenance,
 // unweighted] (mapSubaccountSummaryState reads healths[0..2]), so an empty summary still needs it.
@@ -90,6 +102,9 @@ function relayData(body: RelayQuery, orders?: Map<string, number>): unknown {
     }
     case "market_price":
       return { product_id: body.product_id ?? 2, ask_x18: "0", bid_x18: "0" };
+    case "nonces":
+      // getTxNonce (withdraw path) reads tx_nonce; order_nonce is returned too for completeness.
+      return { tx_nonce: "0", order_nonce: "0" };
     case "market_liquidity":
       // raw tick = [price_x18, size_x18]; the SDK maps price -> human, liquidity -> X18 size.
       return {
@@ -107,8 +122,26 @@ function relayData(body: RelayQuery, orders?: Map<string, number>): unknown {
  *  read's subaccount is `subaccount` (summary) or `sender` (orders). */
 export async function mockRelay(page: Page, opts: RelayOpts = {}): Promise<void> {
   await page.route("**/api/nado/relay/**", async (route: Route) => {
-    let body: RelayQuery = {};
-    try { body = JSON.parse(route.request().postData() ?? "{}") as RelayQuery; } catch { /* non-JSON */ }
+    const isExecute = new URL(route.request().url()).pathname.endsWith("/execute");
+    let raw: Record<string, unknown> = {};
+    try { raw = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>; } catch { /* non-JSON */ }
+
+    if (isExecute) {
+      // WRITE path: the browser signs in-tab and POSTs { <kind>: signedPayload } here. Observe it, then
+      // answer with a valid sequencer envelope — or, for place_order the retry spec wants to fail, a rejection.
+      const kind = EXECUTE_KINDS.find((k) => k in raw);
+      if (kind) opts.onExecute?.(kind, raw[kind] as Record<string, unknown>);
+      if (kind === "place_order" && opts.placeOrderFails?.()) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "failure", error_code: 2020, error: "simulated sequencer rejection" }) });
+        return;
+      }
+      // Accepted: place_order reads data.digest (→ Order venueId); withdraw_collateral reads status==="success".
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "success", data: { digest: "0x" + "ab".repeat(32) } }) });
+      return;
+    }
+
+    // READ path (/query, /edge/query): a VALID engine envelope so reconciles complete offline + clean.
+    const body = raw as RelayQuery;
     opts.onQuery?.(body);
     if (body.type === "market_liquidity" && opts.bookGate) await opts.bookGate;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "success", data: relayData(body, opts.orders) }) });
