@@ -36,7 +36,7 @@ import {
 import type { MarketId } from "@farm/adapter-api";
 import { createLiveOrderFillSource } from "./live-order-fill.js";
 import { assembleLiveConnector, registerNadoWriteBuckets, canonicalOwner } from "./live-connector.js";
-import { createLiveEquitySource } from "./live-equity.js";
+import { createLiveEquitySource, decimalToX18 } from "./live-equity.js";
 import { createLiveBenchmarkDriverDeps, buildLiveCampaignInput } from "./live-benchmark.js";
 import { BenchmarkDriver } from "./ramp.js";
 import { RunMetrics } from "./metrics.js";
@@ -120,7 +120,12 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     const productIds = { [marketId]: PID } as Record<MarketId, number>;
     const sym = symByPid.get(PID)!;
     const sizing = nadoMarketSizing(String(fx(sym.priceIncrement)), BigInt(sym.sizeIncrement.toFixed(0)), BigInt(sym.minSize.toFixed(0)));
-    results.market = { productId: PID, symbol, tick, sizing };
+    // Min-notional sizing (safety): the per-order notional is the market's LIVE min order notional
+    // (sizing.minNotional, the USDT0 floor read from getSymbols), not a hardcoded 100e18 — the
+    // smallest allowed order is the smallest stray exposure. The connector/clampOrderSize already
+    // lifts a below-min size to this floor; sizing it here makes the intent explicit + per-market.
+    const orderNotionalX18 = decimalToX18(sizing.minNotional).toString();
+    results.market = { productId: PID, symbol, tick, sizing, orderNotionalX18 };
 
     const gateway = createMultiWalletNadoGateway({ engine: engine as never, transport, limiter: readShim, engineUrl, chainId: CHAIN_ID, endpoint: DEPLOY.endpoint, markets: [], productIds });
     // DIAGNOSTIC: surface the RAW submitOrder error (the relay classifies + rethrows, hiding it).
@@ -175,7 +180,8 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     } as unknown as typeof base;
     const coordinator = new ExperimentCoordinator(store, dbg, { now: Date.now, random: Math.random, chain: true,
       onEvent: (e: { level: string; event: string; data?: unknown }) => { if (e.level !== "info" || /start|order_send|set_aside|flatten/.test(e.event)) say(`  [evt] ${e.level} ${e.event}${e.data ? " " + J(e.data).slice(0, 140) : ""}`); } });
-    const campaign = buildLiveCampaignInput({ chainId: CHAIN_ID, productId: PID, a: A, b: B, orderNotionalX18: "100000000000000000000", slotMs: TURBO_SLOT_MS, maxConcurrency: 1 });
+    const campaign = buildLiveCampaignInput({ chainId: CHAIN_ID, productId: PID, a: A, b: B, orderNotionalX18, slotMs: TURBO_SLOT_MS, maxConcurrency: 1 });
+    say(`  min-notional sizing: orderNotional=${orderNotionalX18} x18 (live minNotional ${sizing.minNotional} USDT0)`);
 
     // baselines (expect flat on a non-BTC/WETH market)
     const posA0 = await reads.netPositionX18(A, PID), posB0 = await reads.netPositionX18(B, PID);
