@@ -43,12 +43,21 @@ import { RunMetrics } from "./metrics.js";
 import { assertCohortFlatSettled } from "./cohort-settle.js";
 
 const LIVE = process.env.NADO_LIVE === "1" || process.env.NADO_LIVE === "true";
-const CHAIN_ID = 763373;
+// Mainnet parameterization (M0): the chain is env-driven, defaulting to Ink TESTNET (763373) so
+// every existing gated runner is unaffected. Ink MAINNET is 57073 (NADO_CHAIN_ID=57073). The
+// engine/ws/deployment all flow from this one chain id (the registry is chain-keyed), so no other
+// line is chain-specific. No mainnet network call happens here — this only selects the target.
+const CHAIN_ID = Number(process.env.NADO_CHAIN_ID ?? 763373);
 const ENV = CHAIN_ID_TO_CHAIN_ENV[CHAIN_ID]!;
 const engineUrl = ENGINE_CLIENT_ENDPOINTS[ENV];
 const wsUrl = ENGINE_WS_SUBSCRIPTION_CLIENT_ENDPOINTS[ENV];
 const DEPLOY = NADO_DEPLOYMENTS[ENV];
 const SUBACCT = "default";
+// Custody credentials file: the encrypted-workspace path + password live here, out-of-band. It
+// defaults to the TESTNET workspace; a mainnet run points NADO_CREDENTIALS at its own custody
+// file (e.g. ~/.nado-ika-mainnet/credentials.json). This runner NEVER creates that workspace or
+// file — provisioning mainnet custody is a later gate (M2), owned by the operator.
+const CRED_PATH = process.env.NADO_CREDENTIALS ?? join(homedir(), ".nado-ika-testnet", "credentials.json");
 const WINDOW_MS = Number(process.env.AB_WINDOW_MS ?? 150_000); // ~2.5 min; >=60s stable
 // Candidates = TRADABLE 24/7 CRYPTO perps (A & B2 are flat on all of them). Equity perps are
 // TRADING_STOPPED off-hours (weekends) — excluded. Tradability live-probed 2026-10-30
@@ -71,7 +80,7 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
   it("drives one pair at max round-rate for a sustained window and reports fills/sec + latency", async () => {
     await import("wative-core/node");
     const results: Record<string, unknown> = { chainId: CHAIN_ID, startedAt: new Date().toISOString(), windowMs: WINDOW_MS };
-    const cred = JSON.parse(await readFile(join(homedir(), ".nado-ika-testnet", "credentials.json"), "utf8"));
+    const cred = JSON.parse(await readFile(CRED_PATH, "utf8"));
     // Cohort = {A (maker, index 0), the ACTIVE taker}. The active taker is B2 (index 2, fresh +
     // flat); B (index 1) is PARKED holding BTC inventory and is OUT of the cohort.
     const takerRole = cred.activeTaker ?? "B2";
