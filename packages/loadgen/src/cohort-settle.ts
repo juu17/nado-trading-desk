@@ -27,9 +27,6 @@ export interface CohortSettleOptions {
   subaccount?: string;
   /** Max wallets read concurrently against the single-IP budget (default 4). */
   lanes?: number;
-  /** Market ids to check open orders in; positions are checked across all markets the
-   *  gateway reports. Defaults to every market with a non-flat position or any open order. */
-  markets?: string[];
   /** Phase-C seam: resolve to true while an on-chain recall for `owner` is still in flight
    *  (collateral settle). Absent in Phase A (no funding). */
   inFlightRecall?: (owner: string) => Promise<boolean> | boolean;
@@ -53,9 +50,12 @@ export class CohortNotFlatError extends Error {
 }
 
 const isFlatSize = (size: string): boolean => {
-  // Position sizes are human decimals; treat any non-zero magnitude as not flat.
-  const n = Number(size);
-  return !Number.isFinite(n) || n === 0;
+  // SAFETY — fail CLOSED: a position counts as flat ONLY when `size` is a well-formed decimal
+  // equal to 0. Anything unparseable (NaN, ±Infinity, "", whitespace, unit suffixes,
+  // thousand-separators) is treated as NOT flat. A flatness gate must never report an unknown
+  // or malformed size as settled — that would let round N's residue slip into round N+1.
+  if (typeof size !== "string" || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(size.trim())) return false;
+  return Number(size) === 0;
 };
 
 /** Read one wallet's residue: its non-flat positions, resting order count, and (Phase C) any
@@ -81,7 +81,11 @@ export async function cohortResidue(wallets: readonly string[], deps: CohortSett
 }
 
 /** Assert the cohort is flat+settled, or throw CohortNotFlatError with the offending wallets.
- *  Call this between rounds on the reused cohort before admitting the next round. */
+ *  Call this between rounds on the reused cohort before admitting the next round. The caller
+ *  MUST block round N+1 on ANY rejection: both a CohortNotFlatError (a residue) AND a raw read
+ *  failure — reads run stop-on-first-failure, so a wallet read that throws rejects this call
+ *  (fail-closed) and leaves later wallets unread. Treat an errored/unresolved settle as "not
+ *  settled"; never start the next round on it. */
 export async function assertCohortFlatSettled(wallets: readonly string[], deps: CohortSettleDeps, opts: CohortSettleOptions = {}): Promise<void> {
   const residue = await cohortResidue(wallets, deps, opts);
   if (residue.length) throw new CohortNotFlatError(residue);

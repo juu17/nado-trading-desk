@@ -7,7 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryOperationsStore, type ExperimentCampaign, type ExperimentPair, type ExperimentOrderRequest, type ExperimentOrder } from "@farm/core";
 import type { NadoGateway } from "@farm/adapter-nado";
 import type { WalletSigner } from "@farm/adapter-api";
-import { NadoExperimentConnector, type OrderFillSource } from "./experiment-connector.js";
+import { NadoExperimentConnector, defaultNormaliseError, type OrderFillSource } from "./experiment-connector.js";
+import { classifyDispatch } from "./classify.js";
 
 const address = (n: number) => ("0x" + n.toString(16).padStart(40, "0")) as `0x${string}`;
 const A = address(1), B = address(2);
@@ -72,7 +73,7 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
   });
 
   it("classifies a transport abort as not-sent (ABORTED_UNSENT, no halt)", async () => {
-    const d = makeDeps({ onSubmit: () => { const e = new Error("socket") as Error & { name: string }; e.name = "AbortError"; throw e; } });
+    const d = makeDeps({ onSubmit: () => { throw new Error("connect ECONNREFUSED 1.2.3.4:443"); } }); // provably pre-send
     const c = campaign();
     const prepared = await d.conn.prepare(c, pair(), request());
     await d.conn.ledger.enable();
@@ -81,7 +82,7 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
   });
 
   it("classifies a market-state refusal (2006) as a one-order refusal, not a fatal halt", async () => {
-    const d = makeDeps({ onSubmit: () => { throw new Error("engine error 2006 margin"); } });
+    const d = makeDeps({ onSubmit: () => { throw Object.assign(new Error("margin too low"), { nadoCode: 2006 }); } });
     const c = campaign();
     const prepared = await d.conn.prepare(c, pair(), request());
     await d.conn.ledger.enable();
@@ -90,7 +91,7 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
   });
 
   it("treats a deduped retry (2013) as placed — returns the digest, no double place", async () => {
-    const d = makeDeps({ onSubmit: () => { throw new Error("engine error 2013 digest already exists"); } });
+    const d = makeDeps({ onSubmit: () => { throw Object.assign(new Error("digest already exists"), { nadoCode: 2013 }); } });
     const c = campaign();
     const prepared = await d.conn.prepare(c, pair(), request());
     await d.conn.ledger.enable();
@@ -121,5 +122,37 @@ describe("NadoExperimentConnector skeleton (fake gateway)", () => {
     expect(snap.a.owner).toBe(A);
     expect(snap.a.positionX18).toBe("0");
     expect(snap.a.openDigests).toEqual([]);
+  });
+});
+
+describe("defaultNormaliseError — pre-send classification safety (never not-sent on ambiguity)", () => {
+  it("maps ONLY provably pre-send connect failures to transportAborted", () => {
+    expect(defaultNormaliseError({ message: "connect ECONNREFUSED 1.2.3.4:443" }).transportAborted).toBe(true);
+    expect(defaultNormaliseError({ message: "getaddrinfo ENOTFOUND api.test.nado.xyz" }).transportAborted).toBe(true);
+    expect(defaultNormaliseError({ transportAborted: true }).transportAborted).toBe(true); // explicit live marker
+  });
+
+  it("keeps post-send-capable errnos and a bare AbortError as UNKNOWN (not not-sent)", () => {
+    for (const errno of ["ECONNRESET", "ETIMEDOUT", "EPIPE"]) {
+      const info = defaultNormaliseError({ message: `socket ${errno} after write` });
+      expect(info.transportAborted, errno).toBe(false);
+      expect(classifyDispatch(info).kind, errno).toBe("unknown");
+    }
+    expect(classifyDispatch(defaultNormaliseError({ name: "AbortError", message: "The operation was aborted" })).kind).toBe("unknown");
+  });
+
+  it("does NOT mine a bare number from free text (no phantom deduped/placement)", () => {
+    // A stray number must not be read as a sequencer code (a false 2013 → phantom placement).
+    expect(defaultNormaliseError({ message: "waited 2013ms then the socket hung up" }).nadoCode).toBeUndefined();
+    expect(classifyDispatch(defaultNormaliseError({ message: "waited 2013ms then the socket hung up" })).kind).toBe("unknown");
+    // A code-TAGGED token (or a structured field) IS read.
+    expect(defaultNormaliseError({ message: "engine error code: 2006 (margin)" }).nadoCode).toBe(2006);
+    expect(defaultNormaliseError({ nadoCode: 2013 }).nadoCode).toBe(2013);
+  });
+
+  it("never sets transportAborted alongside a structured code — a real fatal is not masked", () => {
+    const info = defaultNormaliseError({ nadoCode: 2095, message: "looks like ECONNREFUSED but carries code 2095" });
+    expect(info.transportAborted).toBe(false);
+    expect(classifyDispatch(info).kind).toBe("rejected-fatal");
   });
 });

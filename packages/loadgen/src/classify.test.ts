@@ -23,7 +23,7 @@ describe("classifyDispatch — halt vs drop-one vs placed", () => {
   });
 
   it("classifies market-state/admissibility codes as refused (one order, re-price)", () => {
-    for (const code of [2011, 2004, 2007, 2006, 2036, 2092, 2003, 2094, 2023, 2067]) {
+    for (const code of [2011, 2004, 2007, 2006, 2036, 2092, 2003, 2094, 2119, 2023, 2067]) {
       expect(classifyDispatch({ nadoCode: code })).toEqual({ kind: "refused", code: String(code) });
     }
   });

@@ -68,4 +68,16 @@ describe("cohort-settle — between-rounds flat gate", () => {
     expect(err).toBeInstanceOf(CohortNotFlatError);
     expect((err as CohortNotFlatError).residue.map((r) => r.owner).sort()).toEqual([A, C].sort());
   });
+
+  it("fails CLOSED on an unparseable position size (NaN/empty/garbage ⇒ NOT flat)", async () => {
+    // A safety gate must never report an unknown size as settled; only a well-formed 0 is flat.
+    for (const bad of ["abc", "1,000", "", "   ", "Infinity", "1 USDT"]) {
+      const deps = fakeGateway({ [A]: { positions: [pos("m", bad)] } });
+      const residue = await cohortResidue([A], deps);
+      expect(residue, `size ${JSON.stringify(bad)} must be treated as NOT flat`).toHaveLength(1);
+      expect(residue[0]!.openPositions).toEqual(["m"]);
+    }
+    const flat = fakeGateway({ [A]: { positions: [pos("m", "0"), pos("n", "0.0")] } });
+    expect(await cohortResidue([A], flat)).toEqual([]);
+  });
 });

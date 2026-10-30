@@ -8,10 +8,14 @@
 //
 // 🚨 Therefore a retried experiment order (same request.id) MUST reuse the SAME resolved
 // {nonce, expiration, priceX18, sizeX18}. Never re-mint a nonce or re-read the price on
-// retry. This cache memoizes those params per request.id so the connector's prepare()
-// rebuilds the identical signed order on every attempt; the first resolve fixes them, and
-// the clock/book are read only then. A nonce embeds recvTime = now + 90 s, so a retry past
-// ~90 s stale-fails at the sequencer (2011) rather than double-placing — safe by construction.
+// retry. This cache memoizes those params per request.id so prepare() rebuilds the identical
+// NUMERIC identity on every attempt; the first resolve fixes them, and the clock/book are read
+// only then. (The digest also binds the appendix's side/reduce/exec-type bits, but those are
+// pure functions of the order's role and so already stable per id — the cache fixes the
+// numeric part.) The end-to-end no-double-place guarantee rests JOINTLY on this stable identity
+// AND the coordinator's claim guard, which dispatches at most ONE order per request.id. A nonce
+// embeds recvTime = now + 90 s, so a retry past ~90 s stale-fails at the sequencer (2011) rather
+// than double-placing — safe by construction.
 //
 // SCOPE: in-memory, single-process (one tab / one node), matching the OperationsStore. If a
 // persisted/recoverable job store is ever adopted, these params must be persisted too, or a

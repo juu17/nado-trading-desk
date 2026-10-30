@@ -53,9 +53,11 @@ export interface DispatchVerdict {
 export const DIGEST_ALREADY_EXISTS = 2013;
 
 /** Market-state / admissibility refusals: received by the sequencer, not placed, safe to re-price.
- *  2011 late-recv, 2004 expired, 2007 price-band, 2006/2036/2092 margin/health, 2003/2094 min-size,
- *  2023 address-screening, 2067 reduce-only-not-applicable. (nado-order-dedup-semantics.) */
-export const REFUSAL_CODES: ReadonlySet<number> = new Set([2011, 2004, 2007, 2006, 2036, 2092, 2003, 2094, 2023, 2067]);
+ *  2011 late-recv, 2004 expired, 2007 price-band, 2006/2036/2092 margin/health, 2003/2094/2119
+ *  min-size (the coordinator treats {2003,2067,2094,2119} as below-minimum size refusals — keep
+ *  this set in sync), 2023 address-screening, 2067 reduce-only-not-applicable. A refusal is the
+ *  SAFE bucket (one order, no halt); confirm the full table + 2119 at the testnet gate. */
+export const REFUSAL_CODES: ReadonlySet<number> = new Set([2011, 2004, 2007, 2006, 2036, 2092, 2003, 2094, 2119, 2023, 2067]);
 
 /** Malformed / mis-signed: the request itself is wrong, so every like order would fail — stop all.
  *  2095 invalid appendix; extend only with codes confirmed to mean "the client built it wrong". */

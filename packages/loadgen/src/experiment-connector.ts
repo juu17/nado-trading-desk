@@ -81,12 +81,21 @@ export interface NadoExperimentConnectorDeps {
 export const defaultNormaliseError: DispatchErrorNormaliser = (error) => {
   const e = (error ?? {}) as Record<string, unknown>;
   const message = typeof e.message === "string" ? e.message : String(error ?? "");
-  const name = typeof e.name === "string" ? e.name : "";
-  const nadoCode = typeof e.nadoCode === "number" ? e.nadoCode
-    : (() => { const m = /\b(1000|1015|2003|2004|2006|2007|2011|2013|2023|2036|2067|2092|2094|2095)\b/.exec(message); return m ? Number(m[1]) : undefined; })();
+  // Prefer a STRUCTURED sequencer code; do NOT mine bare numbers from free text — a stray
+  // "2013" in a timestamp/amount/order-id would fabricate a false deduped → phantom placement.
+  // A code is read only from a structured field, or an explicitly code-tagged token in the text.
+  const structured = typeof e.nadoCode === "number" ? e.nadoCode : typeof e.code === "number" ? e.code : undefined;
+  const nadoCode = structured ?? (() => { const m = /\b(?:code|error_code|reason)[\s:="']*(\d{3,4})\b/i.exec(message); return m ? Number(m[1]) : undefined; })();
   const httpStatus = typeof e.httpStatus === "number" ? e.httpStatus : typeof e.status === "number" ? e.status : undefined;
-  const transportAborted = name === "AbortError" || e.transportAborted === true || /\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EPIPE)\b/.test(message);
   const wafCompressionBlock = e.wafCompressionBlock === true || (httpStatus === 403 && /compression/i.test(message));
+  // transportAborted = PROVABLY pre-send ONLY. ECONNRESET / ETIMEDOUT / EPIPE and a bare
+  // AbortError are post-send-capable (the order MAY have reached the book) → they must stay
+  // UNKNOWN, never not-sent (marking a maybe-placed order ABORTED_UNSENT is a lost-fill /
+  // double-place risk). Only a connect-level failure (or an explicit pre-send marker from the
+  // live wiring) qualifies — and never when a structured code / http status is present (the
+  // request reached the sequencer or the edge).
+  const preSend = e.transportAborted === true || /\b(ECONNREFUSED|ENOTFOUND|EAI_AGAIN)\b/.test(message);
+  const transportAborted = preSend && nadoCode === undefined && httpStatus === undefined;
   return { nadoCode, httpStatus, transportAborted, wafCompressionBlock, message };
 };
 
