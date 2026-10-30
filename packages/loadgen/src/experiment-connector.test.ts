@@ -156,3 +156,52 @@ describe("defaultNormaliseError — pre-send classification safety (never not-se
     expect(classifyDispatch(info).kind).toBe("rejected-fatal");
   });
 });
+
+describe("defaultNormaliseError — the REAL adapter/transport error shapes (testnet-gate confirmed)", () => {
+  // The two concrete shapes the live stack throws (live-gateway assertOk / core MeteredTransport).
+  it("sequencer refusal AdapterError: code lives at raw.error_code (status is the STRING failure)", () => {
+    const info = defaultNormaliseError({ category: "rejected", message: "sequencer 2007: price band", raw: { status: "failure", error_code: 2007 } });
+    expect(info.nadoCode).toBe(2007);
+    expect(info.httpStatus).toBeUndefined();          // H1: "failure" string must NOT become an httpStatus
+    expect(classifyDispatch(info)).toEqual({ kind: "refused", code: "2007" });
+  });
+
+  it("a stringified error_code is read (dedup 2013 → placed), not free-text mined", () => {
+    const info = defaultNormaliseError({ category: "rejected", message: "sequencer 2013: digest exists", raw: { status: "failure", error_code: "2013" } });
+    expect(info.nadoCode).toBe(2013);
+    expect(classifyDispatch(info).kind).toBe("deduped");
+  });
+
+  it("transport 403 (edge/WAF block) → not-sent, never unknown", () => {
+    const info = defaultNormaliseError({ category: "rejected", message: "HTTP 403", code: "403", raw: { status: 403 } });
+    expect(info.nadoCode).toBeUndefined();            // H3: "403" is an HTTP status, not a venue code
+    expect(info.httpStatus).toBe(403);
+    expect(classifyDispatch(info).kind).toBe("not-sent");
+  });
+
+  it("transport 429 → not-sent (rate limited), not mistaken for a nadoCode", () => {
+    const info = defaultNormaliseError({ category: "rate-limited", message: "HTTP 429", code: "429", retryAfterMs: 2000, raw: { status: 429 } });
+    expect(info.nadoCode).toBeUndefined();
+    expect(info.httpStatus).toBe(429);
+    expect(classifyDispatch(info)).toEqual({ kind: "not-sent", code: "RATE_LIMITED" });
+  });
+
+  it("transport 5xx → unknown (maybe placed → halt)", () => {
+    const info = defaultNormaliseError({ category: "retryable-unsafe", message: "HTTP 502", code: "502", raw: { status: 502 } });
+    expect(info.nadoCode).toBeUndefined();
+    expect(info.httpStatus).toBe(502);
+    expect(classifyDispatch(info).kind).toBe("unknown");
+  });
+
+  it("H2: a code-tagged token in a NETWORK/relay error's free text is NOT mined (no phantom dedup)", () => {
+    const info = defaultNormaliseError({ category: "network", message: "relay/sequencer error: upstream code: 2013", raw: { error: "bad gateway" } });
+    expect(info.nadoCode).toBeUndefined();            // would otherwise fabricate a deduped=placed
+    expect(classifyDispatch(info).kind).toBe("unknown");
+  });
+
+  it("H3: a 4-digit numeric-string code IS read as a venue code (future gateway honoring AdapterError.code)", () => {
+    const info = defaultNormaliseError({ category: "rejected", message: "refused", code: "2094" });
+    expect(info.nadoCode).toBe(2094);
+    expect(classifyDispatch(info).kind).toBe("refused");
+  });
+});

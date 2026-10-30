@@ -80,14 +80,50 @@ export interface NadoExperimentConnectorDeps {
  *  gate; until then this reads the common fields defensively and defaults ambiguous to `unknown`. */
 export const defaultNormaliseError: DispatchErrorNormaliser = (error) => {
   const e = (error ?? {}) as Record<string, unknown>;
+  // The adapter throws two concrete shapes (testnet-gate confirmed): a sequencer-refusal
+  // AdapterError from assertOk ({category:"rejected", raw:{status:"failure", error_code}}) and
+  // a transport httpError ({code:String(status), raw:{status:<number>}}). raw is null for
+  // non-envelope errors, so access it null-safely.
+  const raw = (e.raw && typeof e.raw === "object") ? (e.raw as Record<string, unknown>) : {};
   const message = typeof e.message === "string" ? e.message : String(error ?? "");
-  // Prefer a STRUCTURED sequencer code; do NOT mine bare numbers from free text — a stray
-  // "2013" in a timestamp/amount/order-id would fabricate a false deduped → phantom placement.
-  // A code is read only from a structured field, or an explicitly code-tagged token in the text.
-  const structured = typeof e.nadoCode === "number" ? e.nadoCode : typeof e.code === "number" ? e.code : undefined;
-  const nadoCode = structured ?? (() => { const m = /\b(?:code|error_code|reason)[\s:="']*(\d{3,4})\b/i.exec(message); return m ? Number(m[1]) : undefined; })();
-  const httpStatus = typeof e.httpStatus === "number" ? e.httpStatus : typeof e.status === "number" ? e.status : undefined;
-  const wafCompressionBlock = e.wafCompressionBlock === true || (httpStatus === 403 && /compression/i.test(message));
+  const category = typeof e.category === "string" ? e.category : undefined;
+  // A post-send-capable transport/relay failure ("network" / "retryable-unsafe") must NOT have
+  // a code mined from its free text — a "code: 2013" inside a relay's 502 body would fabricate
+  // a phantom deduped (=placed), a double-place-adjacent mislabel (normaliser pre-audit H2).
+  const trustText = category !== "network" && category !== "retryable-unsafe";
+
+  // ---- sequencer ENGINE code. STRUCTURED fields first (raw.error_code is the envelope's
+  //      dedicated code; a stringified number there is fine — NOT free-text mining), then a
+  //      code-TAGGED token in the message. NEVER a bare number from free text (false 2013 →
+  //      phantom placement). A numeric string `code` of 4+ digits is a venue code; a 3-digit
+  //      one is an HTTP status (handled below), never a sequencer code (H3).
+  const codeStr = typeof e.code === "string" && /^\d+$/.test(e.code) ? Number(e.code) : undefined;
+  const rawErrCode = Number((raw as { error_code?: unknown }).error_code);
+  const nadoCode =
+    typeof e.nadoCode === "number" ? e.nadoCode
+    : (raw as { error_code?: unknown }).error_code != null && Number.isFinite(rawErrCode) ? rawErrCode // H4
+    : typeof e.code === "number" ? e.code                                             // G1 (keep: excludes string "429"/"403")
+    : codeStr !== undefined && codeStr >= 1000 ? codeStr                              // H3: 4-digit string → venue code
+    : trustText ? (() => { const m = /\b(?:code|error_code|reason)[\s:="']*(\d{3,4})\b/i.exec(message); return m ? Number(m[1]) : undefined; })()
+    : undefined;
+
+  // ---- HTTP status. NUMERIC fields only: the sequencer envelope's raw.status is the STRING
+  //      "success"/"failure" and must not leak in as a status (H1); only transport's raw.status
+  //      is the HTTP number. A 3-digit numeric string `code` is a transport status.
+  const rawStatus = typeof (raw as { status?: unknown }).status === "number" ? (raw as { status: number }).status : undefined;
+  const httpStatus =
+    typeof e.httpStatus === "number" ? e.httpStatus
+    : typeof e.status === "number" ? e.status
+    : rawStatus !== undefined ? rawStatus
+    : codeStr !== undefined && codeStr < 1000 ? codeStr                               // H3: 3-digit string → HTTP status
+    : undefined;
+
+  // Any edge 403 on this keyless public write is a request REJECTED before origin (Cloudflare
+  // WAF compression block, or an IP-level block) → the order never reached the book → not-sent.
+  // Sequencer admissibility refusals are HTTP-200 + {status:"failure", error_code}, never a 403
+  // (confirm at the testnet gate — docs/phasea-testnet-validation.md §1).
+  const wafCompressionBlock = e.wafCompressionBlock === true || httpStatus === 403;
+
   // transportAborted = PROVABLY pre-send ONLY. ECONNRESET / ETIMEDOUT / EPIPE and a bare
   // AbortError are post-send-capable (the order MAY have reached the book) → they must stay
   // UNKNOWN, never not-sent (marking a maybe-placed order ABORTED_UNSENT is a lost-fill /
