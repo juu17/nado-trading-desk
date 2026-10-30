@@ -63,14 +63,20 @@ describe.skipIf(!LIVE)("LEG 3 — live N=1 sustained self-cross (single-pair bas
     await import("wative-core/node");
     const results: Record<string, unknown> = { chainId: CHAIN_ID, startedAt: new Date().toISOString(), windowMs: WINDOW_MS };
     const cred = JSON.parse(await readFile(join(homedir(), ".nado-ika-testnet", "credentials.json"), "utf8"));
+    // Cohort = {A (maker, index 0), the ACTIVE taker}. The active taker is B2 (index 2, fresh +
+    // flat); B (index 1) is PARKED holding BTC inventory and is OUT of the cohort.
+    const takerRole = cred.activeTaker ?? "B2";
+    const takerEntry = cred.wallets?.find((w: { role: string }) => w.role === takerRole) ?? cred.wallets?.find((w: { role: string }) => w.role === "B");
+    const takerIndex: number = takerEntry?.index ?? 1;
     const A = canonicalOwner((cred.wallets?.find((w: { role: string }) => w.role === "A") ?? { address: cred.address }).address);
-    const B = canonicalOwner((cred.wallets?.find((w: { role: string }) => w.role === "B") ?? {}).address);
+    const B = canonicalOwner(takerEntry.address);
 
     // ---- custody signers (keys stay in the encrypted workspace) -----------------------------
     const custody = await Custody.open({ path: cred.workspacePath, password: cred.password });
     const cohort = await custody.firstCohort(cred.password);
     const signerA = custody.signerFor(cohort, 0, CHAIN_ID);
-    const signerB = custody.signerFor(cohort, 1, CHAIN_ID);
+    const signerB = custody.signerFor(cohort, takerIndex, CHAIN_ID); // the active taker (B2 = index 2)
+    say(`  cohort: A(maker)=${A} taker ${takerRole}(index ${takerIndex})=${B}`);
 
     // ---- live stack: keyless engine, 28 read budget + calibrated write buckets, gateway, A-5 ---
     const engine = new EngineClient({ url: engineUrl });
