@@ -6,21 +6,17 @@ import { PlayIcon } from "@phosphor-icons/react";
 import type { WalletVM } from "@farm/ui";
 import type { Market } from "@farm/adapter-api";
 import { setWalletCohort } from "../lib/custody";
+import { runRound } from "../lib/automation";
+import { shuffle } from "../lib/rand";
+import { useNetwork } from "./NetworkProvider";
 
-// Fisher–Yates shuffle (in place on a copy) — a fair 50/50 split needs an unbiased permutation.
-function shuffled<T>(xs: readonly T[]): T[] {
-  const a = [...xs];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j]!, a[i]!];
-  }
-  return a;
-}
+/** The trade symbol from a market id — the part after the ":" (e.g. "nado:perp:BTC-PERP" → "BTC-PERP"). */
+const symbolOf = (id: string) => id.split(":").pop() ?? id;
 
-/** The sidebar Trading-strategy controls. Wave A: the min–max per-pair volume, the market picker, the
- *  "Cohort" pre-step (random 50/50 split of un-cohorted wallets into maker/taker), and the shell the
- *  automation engine plugs into (the Run toggle, log pane and metrics are inert until the next wave).
- *  The Cohort button is the prerequisite for Run automation — split first, then run. */
+/** The sidebar Trading-strategy controls: the min–max per-pair volume, the market picker, the "Cohort"
+ *  pre-step (random 50/50 split of un-cohorted wallets into maker/taker), and "Run automation" — one
+ *  self-cross round over the split cohort. Cohort first, then run. Automated order placement is
+ *  testnet-only until the mainnet confirm step ships (a later wave); the metrics tiles fill in then too. */
 export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = false }: {
   wallets: WalletVM[];
   markets: Market[];
@@ -30,15 +26,17 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
   const [minVol, setMinVol] = useState("100");
   const [maxVol, setMaxVol] = useState("500");
   const [market, setMarket] = useState<string>("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false);     // the Cohort split is in flight
+  const [running, setRunning] = useState(false); // a round is in flight
   const [log, setLog] = useState<string[]>([]);
+  const { net } = useNetwork();
 
   // Keep a valid market selected as the live market list arrives. Default to BTC-PERP by its EXACT symbol
   // (the part after the ":", same as the option label) — `endsWith("BTC-PERP")` would also catch
   // KBTC-PERP / WBTC-PERP and silently land on whichever appears first.
   useEffect(() => {
     if (markets.length && !markets.some((m) => m.id === market)) {
-      const pick = markets.find((m) => (m.id.split(":").pop() ?? m.id) === "BTC-PERP") ?? markets[0]!;
+      const pick = markets.find((m) => symbolOf(m.id) === "BTC-PERP") ?? markets[0]!;
       setMarket(pick.id);
     }
   }, [markets]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -54,7 +52,7 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
   // no-op. If a write fails mid-loop we report how many actually landed (the skew is real, surfaced not
   // hidden) and still repaint, so the button's M/T count reflects persisted truth and a re-run finishes.
   const runCohortSplit = async () => {
-    const pool = shuffled(wallets.filter((w) => !w.cohort));
+    const pool = shuffle(wallets.filter((w) => !w.cohort));
     if (pool.length < 2) {
       append(pool.length ? "Only 1 un-cohorted wallet — need ≥2 to form a maker/taker pair." : "Nothing to split — every wallet already has a cohort.");
       return;
@@ -78,6 +76,33 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
     }
   };
 
+  // Run ONE self-cross round over the split cohort: pair each maker with a taker, cross at a tick inside
+  // the spread, flatten. The volume range + the per-order notional cap are validated HERE (the first
+  // place they're consumed), placement is refused off testnet, and the round side is re-rolled each run.
+  // Continuous rounds + a pause control arrive in the next wave.
+  const runAutomation = async () => {
+    const min = Number(minVol);
+    const max = Number(maxVol);
+    if (!net.isTestnet) { append("✗ automation is testnet-only until the mainnet confirm step ships."); return; }
+    if (!(min > 0) || !(max >= min)) { append(`✗ volume range invalid — need 0 < min ≤ max (got ${minVol}–${maxVol}).`); return; }
+    if (max > net.caps.orderNotionalUsdt0) { append(`✗ max volume ${max} exceeds the per-order cap ${net.caps.orderNotionalUsdt0} USDT0.`); return; }
+    if (!market) { append("✗ pick a market first."); return; }
+    const makers = wallets.filter((w) => w.cohort === "maker");
+    const takers = wallets.filter((w) => w.cohort === "taker");
+    if (makers.length === 0 || takers.length === 0) { append("✗ run Cohort first — need ≥1 maker and ≥1 taker."); return; }
+    const makerBuys = Math.random() < 0.5;
+    setRunning(true);
+    append(`▶ round: ${Math.min(makers.length, takers.length)} pair(s), makers ${makerBuys ? "buy" : "sell"} @ ${symbolOf(market)}`);
+    try {
+      await runRound(makers, takers, { market, minNotional: min, maxNotional: max, makerBuys }, { log: append });
+    } catch (e) {
+      append(`✗ round aborted: ${(e as Error).message}`);
+    } finally {
+      setRunning(false);
+      onWalletChanged?.();
+    }
+  };
+
   if (!isLive) return <Text variant="secondary" size="xs">Unlock a live cohort to run a trading strategy.</Text>;
 
   return (
@@ -93,7 +118,7 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
       </div>
 
       <Select size="sm" label="Market" hideLabel={false} value={market} onValueChange={(v) => { if (v) setMarket(String(v)); }}>
-        {markets.map((mk) => <Select.Option key={mk.id} value={mk.id}>{mk.id.split(":").pop()}</Select.Option>)}
+        {markets.map((mk) => <Select.Option key={mk.id} value={mk.id}>{symbolOf(mk.id)}</Select.Option>)}
       </Select>
 
       {/* Step 1 — the Cohort pre-step. Explicitly the prerequisite to Run automation. */}
@@ -104,11 +129,15 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
         <Text variant="secondary" size="xs">Step 1 — split un-cohorted wallets 50/50 before running.</Text>
       </div>
 
-      {/* Point 4 — Run automation. Disabled until the engine wave wires it (then it becomes a play/pause
-          toggle); kept inert here with no state behind it, so nothing dead can be toggled. */}
-      <Button size="sm" variant="primary" icon={PlayIcon} disabled>
-        Run automation
-      </Button>
+      {/* Point 4 — Run automation. One self-cross round over the split cohort; disabled until a cohort
+          exists, while a round is in flight, and off testnet (mainnet automation needs its confirm step,
+          a later wave). The play/pause toggle + continuous rounds also come next wave. */}
+      <div className="flex flex-col gap-1">
+        <Button size="sm" variant="primary" icon={PlayIcon} loading={running} disabled={!net.isTestnet || makerCount === 0 || takerCount === 0} onClick={runAutomation}>
+          Run automation
+        </Button>
+        {!net.isTestnet && <Text variant="secondary" size="xs">Testnet only — mainnet automation ships with its confirm step.</Text>}
+      </div>
 
       {/* Log pane — per-wallet eligibility + per-pair results land here once the engine runs. */}
       <div className="max-h-28 overflow-y-auto rounded-md bg-kumo-tint px-2 py-1.5 font-mono text-xs">

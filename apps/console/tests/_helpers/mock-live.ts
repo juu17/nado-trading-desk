@@ -63,6 +63,9 @@ export interface RelayOpts {
    *  != "success"), which the live gateway's assertOk turns into a thrown error → a FAILED bulk job. A live
    *  reference the retry spec flips to false before pressing "Retry N failed". */
   placeOrderFails?: () => boolean;
+  /** Override the order book the `market_liquidity` read returns (raw [price_x18, size_x18] ticks). A
+   *  test uses this to land a specific spread — e.g. a 1-tick book the self-cross engine must skip. */
+  book?: { bids: [string, string][]; asks: [string, string][] };
 }
 
 // The write actions the keyless relay forwards to the sequencer's `/execute` (ALLOW set in the route). An
@@ -91,7 +94,7 @@ function rawOrder(sender: string, i: number): Record<string, unknown> {
  *  Shapes checked against @nadohq/engine-client@0.58.0 queryDataMappers: `subaccount_info` needs the
  *  3-entry `healths` tuple (read unconditionally, even when balances are empty); `orders` needs
  *  `product_orders`; `market_price` needs ask_x18/bid_x18. */
-function relayData(body: RelayQuery, orders?: Map<string, number>): unknown {
+function relayData(body: RelayQuery, orders?: Map<string, number>, book?: { bids: [string, string][]; asks: [string, string][] }): unknown {
   switch (body?.type) {
     case "subaccount_info":
       return { exists: true, spot_balances: [], perp_balances: [], spot_products: [], perp_products: [], health_contributions: {}, healths: THREE_ZERO_HEALTHS };
@@ -106,8 +109,9 @@ function relayData(body: RelayQuery, orders?: Map<string, number>): unknown {
       // getTxNonce (withdraw path) reads tx_nonce; order_nonce is returned too for completeness.
       return { tx_nonce: "0", order_nonce: "0" };
     case "market_liquidity":
-      // raw tick = [price_x18, size_x18]; the SDK maps price -> human, liquidity -> X18 size.
-      return {
+      // raw tick = [price_x18, size_x18]; the SDK maps price -> human, liquidity -> X18 size. A test may
+      // override the book (e.g. a 1-tick spread) via RelayOpts.book; the default is a wide 995/1005 book.
+      return book ?? {
         bids: [["995000000000000000000", "2000000000000000000"], ["994000000000000000000", "5000000000000000000"]],
         asks: [["1005000000000000000000", "3000000000000000000"], ["1006000000000000000000", "4000000000000000000"]],
       };
@@ -144,7 +148,7 @@ export async function mockRelay(page: Page, opts: RelayOpts = {}): Promise<void>
     const body = raw as RelayQuery;
     opts.onQuery?.(body);
     if (body.type === "market_liquidity" && opts.bookGate) await opts.bookGate;
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "success", data: relayData(body, opts.orders) }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "success", data: relayData(body, opts.orders, opts.book) }) });
   });
 }
 

@@ -427,6 +427,20 @@ export async function readOrderBookLive(walletId: string, marketId: string, dept
   }
 }
 
+/** The market's touch + tick: best bid/ask (HUMAN decimals) from a depth-1 book read, plus the
+ *  product's tick size (both the number and the original string, so a caller can price on the tick grid
+ *  without float drift). Keyless like readOrderBookLive (any unlocked wallet's context yields the same
+ *  book). undefined when the market has no live product; a transient book failure leaves bid/ask 0,
+ *  which the self-cross engine treats as a skippable (not errored) pair. */
+export async function marketTouchLive(walletId: string, marketId: string): Promise<{ bid: number; ask: number; tick: number; tickStr: string } | undefined> {
+  const { live, cfg } = await liveFor(walletId);
+  const product = productFor(cfg, marketId);
+  if (!product) return undefined;
+  let book: OrderBook | undefined;
+  try { book = await live.adapter.trading.getOrderBook(marketId as MarketId, 1); } catch { book = undefined; }
+  return { bid: Number(book?.bids?.[0]?.price ?? 0), ask: Number(book?.asks?.[0]?.price ?? 0), tick: Number(product.tickSize), tickStr: product.tickSize };
+}
+
 /** Remaining tokens in the shared per-IP read budget — the sweep gates on this to reserve
  *  headroom for interactive ops (cancels/kill-switch, drawer reads) so it can't starve them. */
 export function readBudget(): number {
