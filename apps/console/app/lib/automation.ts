@@ -30,8 +30,14 @@ export interface RoundConfig {
 export interface RoundHooks {
   /** Append one human-readable line to the sidebar automation log. */
   log: (msg: string) => void;
-  /** Cooperative cancel — checked between pairs and threaded into every in-tab call (wired next wave). */
+  /** Cooperative cancel — checked between pairs and threaded into the in-tab calls that start new work. */
   signal?: AbortSignal;
+  /** Fires as each round begins — the filmstrip refills its drained queue. */
+  onRoundStart?: () => void;
+  /** Fires when a pair begins trading — the filmstrip moves it leftmost. */
+  onPairStart?: (pair: readonly [WalletVM, WalletVM]) => void;
+  /** Fires when a pair finishes — the filmstrip drains it; a "traded" one also feeds the metrics (+ ms). */
+  onPairEnd?: (pair: readonly [WalletVM, WalletVM], outcome: "traded" | "skipped" | "error", ms: number) => void;
 }
 
 export interface RoundResult {
@@ -137,11 +143,17 @@ export async function runRound(makers: readonly WalletVM[], takers: readonly Wal
   let errors = 0;
   for (let i = 0; i < pairs.length; i++) {
     if (hooks.signal?.aborted) { hooks.log("stopped."); break; }
+    const pair = pairs[i]!;
+    hooks.onPairStart?.(pair);
+    const t0 = Date.now();
     try {
-      if ((await runPair(pairs[i]!, i, cfg, hooks)) === "traded") traded++; else skipped++;
+      const outcome = await runPair(pair, i, cfg, hooks);
+      if (outcome === "traded") traded++; else skipped++;
+      hooks.onPairEnd?.(pair, outcome, Date.now() - t0);
     } catch (e) {
       errors++;
       hooks.log(`✗ pair ${i + 1} failed: ${(e as Error).message}`);
+      hooks.onPairEnd?.(pair, "error", Date.now() - t0);
     }
   }
   hooks.log(`round complete: ${traded}/${pairs.length} traded${skipped ? `, ${skipped} skipped` : ""}${errors ? `, ${errors} error(s)` : ""}`);
@@ -161,6 +173,7 @@ export async function runContinuous(makers: readonly WalletVM[], takers: readonl
   let round = 0;
   while (!hooks.signal?.aborted) {
     round++;
+    hooks.onRoundStart?.();
     const makerBuys = Math.random() < 0.5;
     hooks.log(`▶ round ${round} — makers ${makerBuys ? "buy" : "sell"}`);
     const r = await runRound(makers, takers, { ...base, makerBuys }, hooks);

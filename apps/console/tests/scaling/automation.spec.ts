@@ -27,6 +27,10 @@ async function bootAndSplit(page: Page, placed: string[], opts: { book?: { bids:
   await expect(page.getByTestId("wallet-card")).toHaveCount(3, { timeout: 30_000 });
   await page.getByRole("button", { name: /^Cohort · / }).click();
   await expect(page.getByRole("button", { name: "Cohort · 1M / 1T" })).toBeVisible({ timeout: 30_000 });
+  // A small, cap-safe per-pair volume so a run is never refused by whatever per-order notional cap the
+  // preview carries (testnet's default is generous, but keep these tests independent of the ambient cap).
+  await page.getByLabel("Min volume per pair").fill("2");
+  await page.getByLabel("Max volume per pair").fill("5");
 }
 
 test("automation-round-flow: Run self-crosses each maker↔taker pair (maker rests, taker IOC-crosses)", async ({ page }) => {
@@ -98,4 +102,20 @@ test("automation-run-pause: Run starts continuous rounds; Pause stops them", asy
   await page.getByRole("button", { name: "Pause automation" }).click();
   await expect(page.getByRole("button", { name: "Run automation" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("■ stopped.")).toBeVisible();
+});
+
+test("automation-metrics: a run increments the live Pairs metric (and the filmstrip drains off the same hooks)", async ({ page }) => {
+  const placed: string[] = [];
+  await bootAndSplit(page, placed); // testnet, 1M/1T, wide book → each round trades one pair
+
+  await page.getByRole("button", { name: "Run automation" }).click();
+
+  // The Pairs tile counts traded pairs live (same onPairEnd hook that drains the CohortFilmstrip queue;
+  // the drain's visual reordering is best seen on a live run, but its data path is this metric).
+  await expect
+    .poll(async () => Number((await page.getByTestId("metric-pairs").textContent()) ?? "0"), { timeout: 30_000 })
+    .toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Pause automation" }).click();
+  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
 });

@@ -9,6 +9,7 @@ import { setWalletCohort } from "../lib/custody";
 import { runContinuous, TESTNET_ONLY_MSG } from "../lib/automation";
 import { shuffle } from "../lib/rand";
 import { useNetwork } from "./NetworkProvider";
+import { automationProgress } from "../lib/automationProgress";
 
 /** The trade symbol from a market id — the part after the ":" (e.g. "nado:perp:BTC-PERP" → "BTC-PERP"). */
 const symbolOf = (id: string) => id.split(":").pop() ?? id;
@@ -16,7 +17,8 @@ const symbolOf = (id: string) => id.split(":").pop() ?? id;
 /** The sidebar Trading-strategy controls: the min–max per-pair volume, the market picker, the "Cohort"
  *  pre-step (random 50/50 split of un-cohorted wallets into maker/taker), and the Run/Pause toggle that
  *  runs continuous self-cross rounds over the split cohort. Cohort first, then run. Automated order
- *  placement is testnet-only until the mainnet confirm step ships (a later wave); metrics fill in then. */
+ *  placement is testnet-only until the mainnet confirm step ships (a later wave); live metrics + the
+ *  CohortFilmstrip's draining queue track the run as it goes. */
 export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = false }: {
   wallets: WalletVM[];
   markets: Market[];
@@ -29,8 +31,12 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
   const [busy, setBusy] = useState(false);     // the Cohort split is in flight
   const [running, setRunning] = useState(false); // a round is in flight
   const [log, setLog] = useState<string[]>([]);
+  const [metrics, setMetrics] = useState({ pairs: 0, perSec: 0, p99: 0 });
   const { net } = useNetwork();
   const abortRef = useRef<AbortController | null>(null); // the in-flight continuous loop, so Pause can stop it
+  const latRef = useRef<number[]>([]);     // recent per-pair latencies (ms), for p99
+  const timesRef = useRef<number[]>([]);   // traded-pair timestamps in the last window, for pairs/sec
+  const startedAtRef = useRef(0);          // run start, so pairs/sec divides by elapsed (not a fixed 10s)
 
   // Keep a valid market selected as the live market list arrives. Default to BTC-PERP by its EXACT symbol
   // (the part after the ":", same as the option label) — `endsWith("BTC-PERP")` would also catch
@@ -42,7 +48,25 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
     }
   }, [markets]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Stop an in-flight run if the panel unmounts (e.g. a future navigation), so no orphaned loop keeps
+  // placing and the shared progress store doesn't stay stuck "running".
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const append = (m: string) => setLog((l) => [m, ...l].slice(0, 40));
+
+  // Fold one traded pair into the live metrics: a rolling 10s window for pairs/sec and the last 200
+  // latencies for p99. Cheap enough to run per pair (pairs are network-paced, not a tight loop).
+  const recordPair = (ms: number) => {
+    const now = Date.now();
+    const lat = latRef.current; lat.push(ms); if (lat.length > 200) lat.shift();
+    const times = timesRef.current; times.push(now);
+    const cutoff = now - 10_000; while (times.length && times[0]! < cutoff) times.shift();
+    const sorted = [...lat].sort((a, b) => a - b);
+    const p99 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.99) - 1)]! : 0;
+    // Divide by the elapsed window (capped at 10s) so the rate isn't understated while the window fills.
+    const windowSec = Math.min(10, Math.max((now - startedAtRef.current) / 1000, 0.001));
+    setMetrics((prev) => ({ pairs: prev.pairs + 1, perSec: times.length / windowSec, p99 }));
+  };
 
   const makerCount = wallets.filter((w) => w.cohort === "maker").length;
   const takerCount = wallets.filter((w) => w.cohort === "taker").length;
@@ -98,14 +122,24 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setRunning(true);
+    // Fresh metrics for this run (the filmstrip queue refills on the first round's onRoundStart).
+    latRef.current = []; timesRef.current = []; startedAtRef.current = Date.now();
+    setMetrics({ pairs: 0, perSec: 0, p99: 0 });
     append(`▶ start — ${Math.min(makers.length, takers.length)} pair(s)/round @ ${symbolOf(market)}`);
     try {
-      await runContinuous(makers, takers, { market, minNotional: min, maxNotional: max }, { log: append, signal: ctrl.signal });
+      await runContinuous(makers, takers, { market, minNotional: min, maxNotional: max }, {
+        log: append,
+        signal: ctrl.signal,
+        onRoundStart: () => automationProgress.roundStart(),
+        onPairStart: (pair) => automationProgress.pairStart(pair),
+        onPairEnd: (pair, outcome, ms) => { automationProgress.pairEnd(pair); if (outcome === "traded") recordPair(ms); },
+      });
     } catch (e) {
       append(`✗ automation error: ${(e as Error).message}`);
     } finally {
       setRunning(false);
       abortRef.current = null;
+      automationProgress.stop();
       onWalletChanged?.();
     }
   };
@@ -154,11 +188,13 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
           : log.map((l, i) => <div key={i} className={l.startsWith("✗") ? "text-kumo-danger" : l.startsWith("✓") ? "text-kumo-success" : "text-kumo-subtle"}>{l}</div>)}
       </div>
 
-      {/* Live metrics — filled in once the engine + metrics wave lands. */}
+      {/* Live metrics for the current run. "Pairs/s" is submission throughput — a traded pair = maker
+          rest + taker IOC both accepted; WS-confirmed fills/sec is a live-testnet reading. "p99 ms" is the
+          per-pair cycle (place → flatten) over the last 200 pairs. */}
       <div className="grid grid-cols-3 gap-2 text-xs">
-        <div><div className="text-kumo-subtle">Pairs</div><div className="tabular-nums">—</div></div>
-        <div><div className="text-kumo-subtle">Fills/s</div><div className="tabular-nums">—</div></div>
-        <div><div className="text-kumo-subtle">p99 ms</div><div className="tabular-nums">—</div></div>
+        <div><div className="text-kumo-subtle">Pairs</div><div className="tabular-nums" data-testid="metric-pairs">{metrics.pairs}</div></div>
+        <div><div className="text-kumo-subtle">Pairs/s</div><div className="tabular-nums">{metrics.perSec ? metrics.perSec.toFixed(1) : "—"}</div></div>
+        <div><div className="text-kumo-subtle">p99 ms</div><div className="tabular-nums">{metrics.p99 ? Math.round(metrics.p99) : "—"}</div></div>
       </div>
     </div>
   );
