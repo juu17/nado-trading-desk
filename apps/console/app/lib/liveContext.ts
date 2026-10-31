@@ -63,7 +63,7 @@ export const TREASURY_WALLET_ID = "live:0";
 // Native ETH per operator-triggered top-up (~3x the on-chain bootstrap floor of 0.00003 — headroom for
 // a few approve/deposit cycles). Operator-editable in the UI.
 export const DEFAULT_REFUEL_ETH = "0.0001";
-// Per-wallet defaults for the bulk cohort-funding path (testnet). Operator-editable in the FundingPanel.
+// Per-wallet defaults for the bulk cohort-funding path (testnet), used by the headless fund-cohort.mjs.
 export const DEFAULT_MINT_USDT0 = "100";
 export const DEFAULT_DEPOSIT_USDT0 = "50";
 // Minimal ERC-20 slice: balanceOf + allowance read + approve (deposit path) + mint (TESTNET faucet — the
@@ -722,7 +722,7 @@ export async function fundCohortLive(walletIds: string[], opts: FundCohortOpts =
 
   // Fail-fast: reject the whole batch once if a per-wallet amount exceeds its cap, instead of
   // churning refuel+mint on every wallet only to fail each at the (capped) deposit. Thrown, so
-  // the FundingPanel surfaces it; no wallet is touched.
+  // the caller surfaces it; no wallet is touched.
   if (Number(depositEach) > MAX_DEPOSIT_USDT0) throw new Error(`deposit ${depositEach} USDT0/wallet exceeds cap ${MAX_DEPOSIT_USDT0} (NEXT_PUBLIC_NADO_MAX_DEPOSIT_USDT0)`);
   if (Number(gasEach) > MAX_REFUEL_ETH) throw new Error(`gas ${gasEach} ETH/wallet exceeds cap ${MAX_REFUEL_ETH} (NEXT_PUBLIC_NADO_MAX_REFUEL_ETH)`);
 

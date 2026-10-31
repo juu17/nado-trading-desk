@@ -145,41 +145,4 @@ test("mint-flow: the treasury mints the CORRECT USDT0 amount to a wallet and log
   expect(mintTo).toBe(recip); // minted to live:1
 });
 
-test("fund-cohort-flow: bulk-funds every UNFUNDED live wallet (skips the treasury) with correct amounts", async ({ page }) => {
-  const sendRaws: string[] = [];
-  const seq = new MockSequencer();
-  await seq.install(page);
-  await mockState(page);
-  await mockRelay(page); // empty subaccount summaries → every wallet reads as readiness `unfunded`
-  // All wallets report 1 ETH → the per-wallet gas step is SKIPPED (idempotent), so the flow exercises
-  // mint + approve + deposit. eth_call (balanceOf/allowance) returns 0x → 0, so mint + approve both fire.
-  await mockInkRpc(page, { defaultWei: ONE_ETH, onCall: (m, p) => { if (m === "eth_sendRawTransaction") sendRaws.push(String(p[0])); } });
-
-  await page.goto("/");
-  await unlockGeneratedCohort(page); // 3 in-tab wallets: live:0 (treasury) + live:1 + live:2
-  await expect.poll(() => seq.subscribes.length, { timeout: 15_000 }).toBe(PUBLIC_SUBS);
-
-  // The FundingPanel targets unfunded live wallets EXCEPT the treasury → 2 (live:1, live:2).
-  const fundBtn = page.getByRole("button", { name: /^Fund 2 wallets$/ });
-  await expect(fundBtn).toBeVisible({ timeout: 15_000 });
-  await fundBtn.click();
-  await page.getByLabel(/to confirm/i).fill("RUN");
-  await page.locator("button", { hasText: "Confirm & run" }).click();
-
-  // Both targets funded, none failed. (The panel excludes the treasury up front, so the orchestrator's
-  // own treasury-skip guard — defense-in-depth for programmatic callers — isn't exercised → skipped 0.)
-  await expect(page.getByText(/funded 2, failed 0, skipped 0/)).toBeVisible({ timeout: 30_000 });
-
-  // Decode the broadcasts: exactly TWO USDT0.mint calls (one per target), each for the 6-dp deposit-
-  // enabling amount — proves per-wallet iteration + correct scaling (not 18-dp), not a single call.
-  const mintAmts = sendRaws.map((r) => {
-    try {
-      const tx = parseTransaction(r as `0x${string}`);
-      if (String(tx.to).toLowerCase() !== USDT0) return undefined;
-      const d = decodeFunctionData({ abi: MINT_ABI, data: tx.data as `0x${string}` });
-      return d.functionName === "mint" ? (d.args[1] as bigint) : undefined;
-    } catch { return undefined; }
-  }).filter((x): x is bigint => x !== undefined);
-  expect(mintAmts.length).toBe(2);
-  for (const amt of mintAmts) expect(amt).toBe(parseUnits("100", 6));
-});
+// (fund-cohort-flow removed with the FundingPanel — the bulk cohort on-ramp is no longer in the console UI.)

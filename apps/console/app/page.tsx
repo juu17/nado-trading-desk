@@ -207,17 +207,6 @@ export default function Page() {
         selectedCohorts={selectedCohorts}
         onToggleCohort={toggleCohort}
         liveEnabled={live.enabled}
-        liveWallets={liveWallets}
-        onFunded={(ids) => {
-          // After a bulk fund, repaint each attempted wallet + the treasury (native gas, collateral,
-          // readiness) via the same force-refresh + reconcile chain used by onRefueled.
-          for (const id of new Set([...ids, TREASURY_WALLET_ID])) {
-            void forceRefreshNative(id)
-              .then(() => reconcileWallet(id))
-              .then((upd) => setLive((s) => mergeWallet(s, upd)))
-              .catch(() => {});
-          }
-        }}
       />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-4 border-b border-kumo-line bg-kumo-base px-4 py-3">

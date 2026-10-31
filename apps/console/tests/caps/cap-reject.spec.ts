@@ -86,42 +86,6 @@ test("refuel-cap: a refuel over the cap returns a loud error before taking the t
   expect(methods).not.toContain("eth_sendRawTransaction");
 });
 
-test("cohort-cap (fail-fast): a per-wallet deposit over the cap rejects the whole batch up front", async ({ page }) => {
-  const methods: string[] = [];
-  const seq = new MockSequencer();
-  await seq.install(page);
-  await mockState(page);
-  await mockRelay(page);
-  await mockInkRpc(page, { defaultWei: ONE_ETH, onCall: (m) => methods.push(m) });
-  await bootCohort(page, seq);
-
-  // Set the per-wallet deposit over the cap (10) — fundCohortLive must throw before touching any wallet.
-  await page.getByLabel("Deposit USDT0").fill("50");
-  await page.getByRole("button", { name: /^Fund 2 wallets$/ }).click();
-  await page.getByLabel(/to confirm/i).fill("RUN");
-  await page.locator("button", { hasText: "Confirm & run" }).click();
-
-  await expect(page.getByText(/✗ deposit 50 USDT0\/wallet exceeds cap 10/)).toBeVisible({ timeout: 15_000 });
-  expect(methods).not.toContain("eth_sendRawTransaction"); // no wallet was touched
-});
-
-test("cohort-cap (cumulative): the session ceiling halts the batch mid-run after the running total is reached", async ({ page }) => {
-  const seq = new MockSequencer();
-  await seq.install(page);
-  await mockState(page);
-  await mockRelay(page); // empty summaries → both live wallets read `unfunded` (targetable)
-  // 1 ETH each → the gas step is skipped; balanceOf/allowance read 0x → mint + approve + deposit all fire
-  // and the mock cans success receipts, so each wallet's deposit actually "succeeds" and accrues to the
-  // session total (modelled on fund-cohort-flow).
-  await mockInkRpc(page, { defaultWei: ONE_ETH });
-  await bootCohort(page, seq);
-
-  // Deposit 8 USDT0/wallet: under the per-wallet cap (10, so no fail-fast), but two successful deposits
-  // (16) exceed the cohort ceiling (15) — the second wallet must be halted by the cumulative guard.
-  await page.getByLabel("Deposit USDT0").fill("8");
-  await page.getByRole("button", { name: /^Fund 2 wallets$/ }).click();
-  await page.getByLabel(/to confirm/i).fill("RUN");
-  await page.locator("button", { hasText: "Confirm & run" }).click();
-
-  await expect(page.getByText(/cohort deposit cap 15 USDT0 reached after funding 1 wallet/)).toBeVisible({ timeout: 30_000 });
-});
+// (cohort-cap fail-fast + cumulative removed with the FundingPanel — bulk cohort funding is no longer in
+// the console UI; the per-wallet deposit cap stays covered by the deposit-cap test above. The cohort-level
+// cumulative cap still lives in fundCohortLive, exercised by the headless fund-cohort.mjs path.)

@@ -2,9 +2,8 @@
 
 import { Button, Meter, Sidebar as KumoSidebar, Text } from "@cloudflare/kumo";
 import { LockIcon } from "@phosphor-icons/react";
-import type { AccountOption, WalletVM } from "@farm/ui";
+import type { AccountOption } from "@farm/ui";
 import { AccountFilter } from "./AccountFilter";
-import { FundingPanel } from "./FundingPanel";
 import { NetworkSwitch } from "./NetworkSwitch";
 import { useNetwork } from "./NetworkProvider";
 import { useVault } from "./AppGate";
@@ -22,8 +21,6 @@ interface Props {
   selectedCohorts: Set<"maker" | "taker">;
   onToggleCohort: (c: "maker" | "taker") => void;
   liveEnabled?: boolean;
-  liveWallets?: WalletVM[];                       // live VMs (with readiness) for the Fund-cohort panel
-  onFunded?: (walletIds: string[]) => void;       // repaint after a bulk fund
 }
 
 /** Section label — Kumo's own sidebar group-label recipe (sentence case, never uppercased). */
@@ -90,10 +87,6 @@ export function Sidebar(props: Props) {
               })}
             </div>
           </div>
-
-          {/* Fund cohort is a TESTNET-only bulk on-ramp (its mint step can't run on mainnet, where
-              USDT0 is bridged) — hide it entirely on mainnet so it never burns real gas. */}
-          {props.liveEnabled && net.isTestnet && props.liveWallets && props.liveWallets.length > 0 && <FundingPanel wallets={props.liveWallets} onFunded={props.onFunded} />}
 
           <Text variant="secondary" size="xs">
             {props.liveEnabled
