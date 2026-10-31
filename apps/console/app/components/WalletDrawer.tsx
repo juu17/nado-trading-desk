@@ -101,7 +101,7 @@ function CohortSwitch({ walletId, cohort, onChanged }: { walletId: string; cohor
     try { await setWalletCohort(walletId, c); onChanged?.(); } catch { /* keep the current role on failure */ } finally { setBusy(false); }
   };
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex shrink-0 items-center gap-1.5">
       <Text variant="secondary" size="xs" as="span">Cohort</Text>
       <ButtonGroup aria-label="Cohort">
         {(["maker", "taker"] as const).map((c) => (
@@ -273,12 +273,13 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                     {wallet.address.value}
                   </InlineCopyText>
                 </div>
-                {isLive && <CohortSwitch walletId={wallet.id} cohort={wallet.cohort} onChanged={onWalletChanged} />}
               </div>
               <Button variant="ghost" shape="square" size="sm" icon={XIcon} aria-label="Close" onClick={onClose} />
             </div>
 
             <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+              {isLive && <CohortSwitch walletId={wallet.id} cohort={wallet.cohort} onChanged={onWalletChanged} />}
+
               <Grid variant="side-by-side" gap="sm" className="shrink-0">
                 <Stat label="Quote" value={`${wallet.quoteBalance} USDT0`} />
                 <Stat label="Native" value={`${wallet.nativeBalance} ETH`} />
