@@ -1,12 +1,10 @@
 "use client";
 
 import { Button, Meter, Sidebar as KumoSidebar, Text } from "@cloudflare/kumo";
-import { LockIcon } from "@phosphor-icons/react";
 import type { AccountOption } from "@farm/ui";
 import { AccountFilter } from "./AccountFilter";
 import { NetworkSwitch } from "./NetworkSwitch";
 import { useNetwork } from "./NetworkProvider";
-import { useVault } from "./AppGate";
 
 interface Props {
   workspaceName: string;
@@ -28,12 +26,19 @@ const Label = ({ children }: { children: React.ReactNode }) => (
   <span className="text-sm font-medium text-kumo-subtle">{children}</span>
 );
 
+/** Section splitter — a labelled hairline divider that groups the controls beneath it (one level above
+ *  the per-field Label). */
+const Splitter = ({ children }: { children: React.ReactNode }) => (
+  <div className="flex items-center border-t border-kumo-line pt-3 text-xs font-semibold uppercase tracking-wider text-kumo-subtle">
+    {children}
+  </div>
+);
+
 /** Frozen left rail = Kumo's Sidebar (collapsible="none" on the Provider in page.tsx renders a fixed
  *  <aside> that never collapses or turns into a mobile sheet): Kumo Header for the brand, Kumo Content
  *  as the scroll area for the workspace summary, network, account filter, tags and tool panels. */
 export function Sidebar(props: Props) {
   const { net } = useNetwork();
-  const { relock } = useVault(); // lock the vault from home (the custody panel used to host this)
   return (
     <KumoSidebar>
       <KumoSidebar.Header>
@@ -52,6 +57,8 @@ export function Sidebar(props: Props) {
             customValue={`${props.shownWallets} / ${props.totalWallets}`}
             showValue
           />
+
+          <Splitter>Filter</Splitter>
 
           <NetworkSwitch />
 
@@ -88,13 +95,13 @@ export function Sidebar(props: Props) {
             </div>
           </div>
 
+          <Splitter>Trading strategy</Splitter>
+
           <Text variant="secondary" size="xs">
             {props.liveEnabled
               ? `Live ${net.networkName} enabled · live-cohort fires sign + submit to the real sequencer; mock wallets stay offline`
               : "Offline mock · no testnet · actions run the real adapter + plan runner"}
           </Text>
-
-          <Button variant="secondary" size="sm" icon={LockIcon} onClick={relock} className="self-start">Lock vault</Button>
         </div>
       </KumoSidebar.Content>
     </KumoSidebar>
