@@ -207,6 +207,9 @@ export default function Page() {
         selectedCohorts={selectedCohorts}
         onToggleCohort={toggleCohort}
         liveEnabled={live.enabled}
+        liveWallets={liveWallets}
+        markets={live.markets}
+        onWalletChanged={refreshLive}
       />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-4 border-b border-kumo-line bg-kumo-base px-4 py-3">

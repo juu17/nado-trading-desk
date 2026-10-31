@@ -1,10 +1,12 @@
 "use client";
 
 import { Button, Meter, Sidebar as KumoSidebar, Text } from "@cloudflare/kumo";
-import type { AccountOption } from "@farm/ui";
+import type { AccountOption, WalletVM } from "@farm/ui";
+import type { Market } from "@farm/adapter-api";
 import { AccountFilter } from "./AccountFilter";
 import { NetworkSwitch } from "./NetworkSwitch";
 import { useNetwork } from "./NetworkProvider";
+import { TradingStrategy } from "./TradingStrategy";
 
 interface Props {
   workspaceName: string;
@@ -19,6 +21,9 @@ interface Props {
   selectedCohorts: Set<"maker" | "taker">;
   onToggleCohort: (c: "maker" | "taker") => void;
   liveEnabled?: boolean;
+  liveWallets?: WalletVM[];               // the live fleet VMs — the Trading-strategy cohort split + engine
+  markets?: Market[];                     // live markets for the strategy's market picker
+  onWalletChanged?: () => void;           // repaint after the Cohort split writes cohort tags
 }
 
 /** Section label — Kumo's own sidebar group-label recipe (sentence case, never uppercased). */
@@ -96,6 +101,8 @@ export function Sidebar(props: Props) {
           </div>
 
           <Splitter>Trading strategy</Splitter>
+
+          <TradingStrategy wallets={props.liveWallets ?? []} markets={props.markets ?? []} onWalletChanged={props.onWalletChanged} isLive={props.liveEnabled} />
 
           <Text variant="secondary" size="xs">
             {props.liveEnabled
