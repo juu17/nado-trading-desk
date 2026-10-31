@@ -52,7 +52,7 @@ export const WalletCard = memo(function WalletCard({ wallet, selected, onSelect 
         </div>
       </div>
       <div className="flex flex-wrap gap-1">
-        {wallet.cohorts.map((c) => <Badge key={c} variant="secondary">{c}</Badge>)}
+        {wallet.tags.map((c) => <Badge key={c} variant="secondary">{c}</Badge>)}
       </div>
     </LayerCard>
   );

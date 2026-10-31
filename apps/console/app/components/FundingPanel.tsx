@@ -20,7 +20,7 @@ export function FundingPanel({ wallets, onFunded }: { wallets: WalletVM[]; onFun
   // the readiness gate lags on-chain confirmation (the sequencer indexes collateral after the tx mines),
   // so without this a re-run during that window would re-target + double-deposit a just-funded wallet.
   const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
-  const targets = wallets.filter((w) => w.cohorts.includes(LIVE_COHORT) && w.readiness === "unfunded" && w.id !== TREASURY_WALLET_ID && !doneIds.has(w.id));
+  const targets = wallets.filter((w) => w.tags.includes(LIVE_COHORT) && w.readiness === "unfunded" && w.id !== TREASURY_WALLET_ID && !doneIds.has(w.id));
   const [gasEach, setGasEach] = useState(DEFAULT_REFUEL_ETH);
   const [mintEach, setMintEach] = useState(DEFAULT_MINT_USDT0);
   const [depositEach, setDepositEach] = useState(DEFAULT_DEPOSIT_USDT0);

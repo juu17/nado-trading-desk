@@ -24,7 +24,8 @@ export interface WalletVM {
   accountKind: AccountKind;
   index: number;            // derivation slot within the account
   address: Address;
-  cohorts: string[];        // cohort = tag (rides wative Wallet tags)
+  tags: string[];           // freeform per-wallet labels (ride wative Wallet tags)
+  cohort?: "maker" | "taker"; // the self-cross role group (rides a reserved wative tag); unset until assigned
   nativeBalance: string;    // display decimal
   quoteBalance: string;     // display decimal (USD-ish quote)
   status: WalletStatus;
@@ -35,5 +36,5 @@ export interface WalletVM {
 export interface Fleet {
   accounts: AccountVM[];
   wallets: WalletVM[];
-  cohorts: string[];
+  tags: string[];
 }

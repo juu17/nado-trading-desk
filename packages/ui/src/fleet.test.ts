@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateFleet } from "./mock.js";
-import { filterWallets, accountOptions, cohortsOf } from "./filter.js";
+import { filterWallets, accountOptions, tagsOf } from "./filter.js";
 
 describe("ui view-model (mock + filter)", () => {
   const fleet = generateFleet({ hdAccounts: 2, walletsPerHd: 5, pkAccounts: 2, seed: 1 });
@@ -22,12 +22,12 @@ describe("ui view-model (mock + filter)", () => {
     expect(filterWallets(fleet.wallets, [])).toHaveLength(0); // nothing checked → nothing shown
   });
 
-  it("intersects the account filter with cohort tags", () => {
+  it("intersects the account filter with tags", () => {
     const allIds = fleet.accounts.map((a) => a.id);
-    const cohort = cohortsOf(fleet.wallets)[0]!;
-    const out = filterWallets(fleet.wallets, allIds, [cohort]);
+    const tag = tagsOf(fleet.wallets)[0]!;
+    const out = filterWallets(fleet.wallets, allIds, [tag]);
     expect(out.length).toBeGreaterThan(0);
-    expect(out.every((w) => w.cohorts.includes(cohort))).toBe(true);
+    expect(out.every((w) => w.tags.includes(tag))).toBe(true);
   });
 
   it("accountOptions mirrors the accounts (id/kind/count)", () => {

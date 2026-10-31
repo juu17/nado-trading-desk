@@ -21,7 +21,7 @@ export interface FleetOptions {
   hdAccounts?: number;
   walletsPerHd?: number;
   pkAccounts?: number;
-  cohorts?: readonly string[];
+  tags?: readonly string[];
   seed?: number;
 }
 
@@ -44,7 +44,7 @@ export function generateFleet(opts: FleetOptions = {}): Fleet {
   const hdAccounts = opts.hdAccounts ?? 6;
   const walletsPerHd = opts.walletsPerHd ?? 160;
   const pkAccounts = opts.pkAccounts ?? 12;
-  const cohorts = opts.cohorts ?? ["alpha", "beta", "gamma", "maker", "taker"];
+  const tagPool = opts.tags ?? ["alpha", "beta", "gamma", "maker", "taker"];
   const rng = lcg(opts.seed ?? 0x5eed);
 
   const accounts: AccountVM[] = [];
@@ -54,11 +54,11 @@ export function generateFleet(opts: FleetOptions = {}): Fleet {
     const address: Address = { family: "evm", value: `0x${hex(rng, 40)}` as `0x${string}` };
     const tagCount = 1 + Math.floor(rng() * 2);
     const tags = new Set<string>();
-    while (tags.size < tagCount) tags.add(pick(rng, cohorts));
+    while (tags.size < tagCount) tags.add(pick(rng, tagPool));
     wallets.push({
       id: `${accountId}:${index}`,
       accountId, accountName, accountKind: kind, index, address,
-      cohorts: [...tags],
+      tags: [...tags],
       nativeBalance: (rng() * 5).toFixed(4),
       quoteBalance: (rng() * 10_000).toFixed(2),
       status: weighted(rng, STATUSES),
@@ -80,5 +80,5 @@ export function generateFleet(opts: FleetOptions = {}): Fleet {
     pushWallet(id, name, "PK", 0);
   }
 
-  return { accounts, wallets, cohorts: [...cohorts] };
+  return { accounts, wallets, tags: [...tagPool] };
 }

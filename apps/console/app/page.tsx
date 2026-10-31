@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Empty, LinkButton, Sidebar as KumoSidebar, Text, Tooltip } from "@cloudflare/kumo";
 import { ArrowRightIcon, FunnelIcon, ReceiptIcon, UsersThreeIcon, WalletIcon } from "@phosphor-icons/react";
-import { filterWallets, accountOptions, cohortsOf } from "@farm/ui";
+import { filterWallets, accountOptions, tagsOf } from "@farm/ui";
 import type { WalletVM, Fleet } from "@farm/ui";
 import { Sidebar } from "./components/Sidebar";
 import { WalletGrid } from "./components/WalletGrid";
@@ -102,13 +102,13 @@ export default function Page() {
   const fleet = useMemo<Fleet>(() => ({
     accounts: live.accounts ?? [],
     wallets: liveWallets,
-    cohorts: cohortsOf(liveWallets),
+    tags: tagsOf(liveWallets),
   }), [live.accounts, liveWallets]);
 
   const options = useMemo(() => accountOptions(fleet.accounts), [fleet]);
 
   const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(() => new Set());
-  const [selectedCohorts, setSelectedCohorts] = useState<Set<string>>(new Set());
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
   const [drawerWallet, setDrawerWallet] = useState<WalletVM | null>(null);
   const [accountingOpen, setAccountingOpen] = useState(false);
 
@@ -173,12 +173,12 @@ export default function Page() {
   }, [accountKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const shown = useMemo(
-    () => filterWallets(fleet.wallets, [...selectedAccounts], [...selectedCohorts]),
-    [fleet, selectedAccounts, selectedCohorts],
+    () => filterWallets(fleet.wallets, [...selectedAccounts], [...selectedTags]),
+    [fleet, selectedAccounts, selectedTags],
   );
 
-  const toggleCohort = (c: string) =>
-    setSelectedCohorts((s) => { const n = new Set(s); if (n.has(c)) n.delete(c); else n.add(c); return n; });
+  const toggleTag = (t: string) =>
+    setSelectedTags((s) => { const n = new Set(s); if (n.has(t)) n.delete(t); else n.add(t); return n; });
 
   // Kumo Sidebar.Provider is the app shell: collapsible="none" keeps the left rail frozen (a fixed
   // <aside>, never a mobile sheet); only <main> scrolls. Width: Kumo honours `defaultWidth` only when
@@ -197,9 +197,9 @@ export default function Page() {
         accountOptions={options}
         selectedAccounts={selectedAccounts}
         onAccountsChange={setSelectedAccounts}
-        cohorts={fleet.cohorts}
-        selectedCohorts={selectedCohorts}
-        onToggleCohort={toggleCohort}
+        tags={fleet.tags}
+        selectedTags={selectedTags}
+        onToggleTag={toggleTag}
         liveEnabled={live.enabled}
         liveWallets={liveWallets}
         onFunded={(ids) => {

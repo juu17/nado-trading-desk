@@ -8,12 +8,12 @@ const rec = (over: Partial<AccountingRecord> = {}): AccountingRecord => ({
 
 describe("accounting rollup (Q61)", () => {
   const records: AccountingRecord[] = [
-    rec({ walletId: "A", cohorts: ["alpha"], side: "buy", notional: 100, fee: 0.1 }),
-    rec({ walletId: "A", cohorts: ["alpha", "maker"], side: "sell", notional: 200, fee: 0.2 }),
-    rec({ walletId: "B", cohorts: ["maker"], side: "buy", notional: 50, fee: 0.05 }),
+    rec({ walletId: "A", tags: ["alpha"], side: "buy", notional: 100, fee: 0.1 }),
+    rec({ walletId: "A", tags: ["alpha", "maker"], side: "sell", notional: 200, fee: 0.2 }),
+    rec({ walletId: "B", tags: ["maker"], side: "buy", notional: 50, fee: 0.05 }),
   ];
 
-  it("aggregates totals, per-wallet, and per-cohort (a record counts in each cohort)", () => {
+  it("aggregates totals, per-wallet, and per-tag (a record counts in each tag)", () => {
     const r = rollup(records);
     expect(r.totals).toMatchObject({ orders: 3, volume: 350, buys: 2, sells: 1 });
     expect(r.totals.fees).toBeCloseTo(0.35);
@@ -21,7 +21,7 @@ describe("accounting rollup (Q61)", () => {
     const a = r.byWallet.find((w) => w.key === "A")!;
     expect(a).toMatchObject({ orders: 2, volume: 300, buys: 1, sells: 1 });
 
-    const maker = r.byCohort.find((c) => c.key === "maker")!;
+    const maker = r.byTag.find((t) => t.key === "maker")!;
     expect(maker.orders).toBe(2); // A's sell + B's buy
     expect(maker.volume).toBe(250);
     expect(r.byWallet[0]!.key).toBe("A"); // sorted by volume desc

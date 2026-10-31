@@ -70,7 +70,7 @@ class BulkEngine {
     const i = op.input;
     const notional = Number(i.price ?? 0) * Number(i.size);
     this.activity.push({
-      walletId: wallet.id, accountName: wallet.accountName, cohorts: wallet.cohorts,
+      walletId: wallet.id, accountName: wallet.accountName, tags: wallet.tags,
       market: i.market, side: i.side, notional, fee: notional * 0.0003, status: "open", ts: Date.now(),
     });
     if (this.activity.length > 5000) this.activity.splice(0, this.activity.length - 5000);

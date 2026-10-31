@@ -107,7 +107,7 @@ export function liveWalletVMs(state: LiveState): WalletVM[] {
     });
     return {
       id: w.walletId, accountId: w.accountSlug, accountName: w.accountName, accountKind: w.accountKind,
-      index: i, address, cohorts: [LIVE_COHORT],
+      index: i, address, tags: [LIVE_COHORT],
       nativeBalance: w.native ?? "—", quoteBalance: quote?.total ?? "—",
       status: "active", readiness, openOrders: w.openOrders?.length ?? 0,
     };

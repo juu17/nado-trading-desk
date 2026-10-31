@@ -99,7 +99,7 @@ export function AccountingView({ open, records, onClose }: { open: boolean; reco
                 />
               ) : (
                 <>
-                  <RollupTable title="By cohort" rows={report.byCohort} keyLabel="Cohort" />
+                  <RollupTable title="By tag" rows={report.byTag} keyLabel="Tag" />
                   <RollupTable title="By wallet" rows={report.byWallet} keyLabel="Wallet" />
                 </>
               )}

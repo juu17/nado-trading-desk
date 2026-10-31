@@ -16,9 +16,9 @@ interface Props {
   accountOptions: AccountOption[];
   selectedAccounts: Set<string>;
   onAccountsChange: (next: Set<string>) => void;
-  cohorts: string[];
-  selectedCohorts: Set<string>;
-  onToggleCohort: (c: string) => void;
+  tags: string[];
+  selectedTags: Set<string>;
+  onToggleTag: (t: string) => void;
   liveEnabled?: boolean;
   liveWallets?: WalletVM[];                       // live VMs (with readiness) for the Fund-cohort panel
   onFunded?: (walletIds: string[]) => void;       // repaint after a bulk fund
@@ -31,7 +31,7 @@ const Label = ({ children }: { children: React.ReactNode }) => (
 
 /** Frozen left rail = Kumo's Sidebar (collapsible="none" on the Provider in page.tsx renders a fixed
  *  <aside> that never collapses or turns into a mobile sheet): Kumo Header for the brand, Kumo Content
- *  as the scroll area for the workspace summary, network, account filter, cohort tags and tool panels. */
+ *  as the scroll area for the workspace summary, network, account filter, tags and tool panels. */
 export function Sidebar(props: Props) {
   const { net } = useNetwork();
   const { relock } = useVault(); // lock the vault from home (the custody panel used to host this)
@@ -62,13 +62,13 @@ export function Sidebar(props: Props) {
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label>Cohorts (tags)</Label>
+            <Label>Tags</Label>
             <div className="flex flex-wrap gap-1">
-              {props.cohorts.map((c) => {
-                const on = props.selectedCohorts.has(c);
+              {props.tags.map((t) => {
+                const on = props.selectedTags.has(t);
                 return (
-                  <Button key={c} size="xs" variant={on ? "primary" : "secondary"} aria-pressed={on} onClick={() => props.onToggleCohort(c)}>
-                    {c}
+                  <Button key={t} size="xs" variant={on ? "primary" : "secondary"} aria-pressed={on} onClick={() => props.onToggleTag(t)}>
+                    {t}
                   </Button>
                 );
               })}

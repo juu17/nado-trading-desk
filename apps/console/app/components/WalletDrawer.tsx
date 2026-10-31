@@ -374,7 +374,7 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
               )}
 
               <div className="mt-auto flex shrink-0 flex-wrap gap-1">
-                {wallet.cohorts.map((c) => <Badge key={c} variant="secondary">{c}</Badge>)}
+                {wallet.tags.map((c) => <Badge key={c} variant="secondary">{c}</Badge>)}
               </div>
             </div>
           </>
