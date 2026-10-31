@@ -52,6 +52,7 @@ export default defineConfig({
       NEXT_PUBLIC_NADO_MAX_DEPOSIT_USDT0: "10",
       NEXT_PUBLIC_NADO_MAX_REFUEL_ETH: "0.001",
       NEXT_PUBLIC_NADO_MAX_COHORT_USDT0: "15",
+      NEXT_PUBLIC_NADO_MAX_WALLET_USDT0: "8",
     },
   },
 });

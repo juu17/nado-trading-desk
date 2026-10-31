@@ -49,7 +49,7 @@ test("automation-round-flow: Run self-crosses each maker↔taker pair (maker res
   await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
 });
 
-test("automation-tight-spread: a 1-tick book has no interior tick, so pairs are SKIPPED — no orders placed", async ({ page }) => {
+test("automation-tight-spread: a 1-tick book has no interior tick, so the pair is SKIPPED and the run stops", async ({ page }) => {
   const placed: string[] = [];
   // bid 2000.0 / ask 2000.1 — a 1-tick spread (tick 0.1). No tick strictly between → can't self-cross.
   await bootAndSplit(page, placed, {
@@ -61,29 +61,31 @@ test("automation-tight-spread: a 1-tick book has no interior tick, so pairs are 
 
   await page.getByRole("button", { name: "Run automation" }).click();
 
-  // A skip does metered I/O (the book read), so the continuous loop keeps skipping round after round
-  // rather than self-stopping — assert on the first skip, then pause.
+  // The pair is skipped (no interior tick), so every round trades nothing and after a few the loop stops.
   await expect(page.getByText(/^⊘ pair 1 skipped/).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/^round complete: 0\/1 traded, 1 skipped/).first()).toBeVisible();
-
-  await page.getByRole("button", { name: "Pause automation" }).click(); // stop the loop
-  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/no pairs traded in \d+ rounds/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("■ stopped.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run automation" })).toBeVisible();
   // The tight spread is detected BEFORE any order is built, so nothing ever reached the relay.
   expect(placed.length).toBe(0);
 });
 
-test("automation-mainnet-gate: switching to mainnet disables Run until the typed-confirm wave — no automated placement", async ({ page }) => {
+test("automation-mainnet-confirm: on mainnet, Run opens a typed-RUN confirm; cancel places nothing", async ({ page }) => {
   const placed: string[] = [];
   await bootAndSplit(page, placed); // boots on testnet; the cohort is split (1M/1T)
 
-  // Flip to mainnet via the network switch (confirm its real-funds alert). The cohort persists (custody
-  // is chain-agnostic), so with a maker AND a taker present the ONLY remaining reason Run is disabled is
-  // the testnet gate — mainnet automation needs its confirm step (a later wave).
+  // Flip to mainnet via the network switch (confirm its real-funds alert); the cohort persists.
   await page.getByRole("button", { name: "mainnet" }).click();
   await page.getByRole("button", { name: "Switch to Mainnet" }).click();
 
-  await expect(page.getByText("Testnet only — mainnet automation ships with its confirm step.")).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole("button", { name: "Run automation" })).toBeDisabled();
+  // Run is enabled on mainnet, but a click opens the typed-RUN confirm — it does NOT start a run.
+  await page.getByRole("button", { name: "Run automation" }).click();
+  await expect(page.getByText(/Run automation on MAINNET/i)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/real USDT0/i)).toBeVisible();
+  // Cancel (Escape) dismisses it with nothing placed — the mainnet gate held.
+  await page.keyboard.press("Escape");
+  await expect(page.getByText(/Run automation on MAINNET/i)).toBeHidden();
+  await expect(page.getByRole("button", { name: "Run automation" })).toBeVisible();
   expect(placed.length).toBe(0);
 });
 

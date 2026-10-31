@@ -14,7 +14,7 @@
 import { parseEther } from "viem";
 
 export interface SpendCaps {
-  orderNotionalUsdt0: number; depositUsdt0: number; refuelEth: number; cohortUsdt0: number; refuelWei: bigint;
+  orderNotionalUsdt0: number; depositUsdt0: number; refuelEth: number; cohortUsdt0: number; walletUsdt0: number; refuelWei: bigint;
 }
 export interface NetworkConfig {
   chainId: number; isTestnet: boolean; label: string; networkName: string; rpc: string; usdt0: string; caps: SpendCaps;
@@ -31,13 +31,14 @@ function envNum(raw: string | undefined, dflt: number): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
-function caps(d: { order: number; deposit: number; refuel: number; cohort: number }): SpendCaps {
+function caps(d: { order: number; deposit: number; refuel: number; cohort: number; wallet: number }): SpendCaps {
   const refuelEth = envNum(process.env.NEXT_PUBLIC_NADO_MAX_REFUEL_ETH, d.refuel);
   return {
     orderNotionalUsdt0: envNum(process.env.NEXT_PUBLIC_NADO_MAX_ORDER_NOTIONAL_USDT0, d.order),
     depositUsdt0: envNum(process.env.NEXT_PUBLIC_NADO_MAX_DEPOSIT_USDT0, d.deposit),
     refuelEth,
     cohortUsdt0: envNum(process.env.NEXT_PUBLIC_NADO_MAX_COHORT_USDT0, d.cohort),
+    walletUsdt0: envNum(process.env.NEXT_PUBLIC_NADO_MAX_WALLET_USDT0, d.wallet),
     refuelWei: parseEther(String(refuelEth)),
   };
 }
@@ -47,13 +48,13 @@ export const NETWORKS: Record<number, NetworkConfig> = {
     chainId: TESTNET, isTestnet: true, label: "Ink Sepolia", networkName: "testnet",
     rpc: "https://rpc-gel-sepolia.inkonchain.com",            // CORS-open
     usdt0: "0x60F50F902b2E91aef7D6c700Eb22599e297fa86F",       // 6-dec faucet token
-    caps: caps({ order: 1_000_000, deposit: 100_000, refuel: 1, cohort: 1_000_000 }), // loose for testnet
+    caps: caps({ order: 1_000_000, deposit: 100_000, refuel: 1, cohort: 1_000_000, wallet: 100_000 }), // loose for testnet
   },
   [MAINNET]: {
     chainId: MAINNET, isTestnet: false, label: "Ink", networkName: "mainnet",
     rpc: "https://rpc-gel.inkonchain.com",                     // CORS-open (verified 2026-10-18)
     usdt0: "0x0200C29006150606B650577BBE7B6248F58470c1",       // mainnet USDT0 (6-dec, verified 2026-10-18)
-    caps: caps({ order: 150, deposit: 200, refuel: 0.005, cohort: 1_000 }),           // TIGHT for mainnet
+    caps: caps({ order: 150, deposit: 200, refuel: 0.005, cohort: 1_000, wallet: 500 }), // TIGHT for mainnet
   },
 };
 

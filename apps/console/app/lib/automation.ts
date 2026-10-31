@@ -6,16 +6,16 @@
 // Each traded pair then flattens and clears any resting remainder, so the next round starts flat.
 //
 // This is the lean in-tab loop over the liveContext primitives — no node coordinator — driven by the
-// sidebar's Run button. Wave B scope: ONE round, sequential pairs. Continuous rounds, the run/pause
-// toggle, eligibility gating and the spend-caps/mainnet-confirm layer land in later waves.
+// sidebar's Run/Pause toggle: continuous rounds with per-wallet + per-cohort cumulative caps, and a
+// per-run typed-RUN confirm off testnet. Eligibility gating (skip not-ready wallets) is a follow-up.
 import type { WalletVM } from "@farm/ui";
 import { placeOrderLive, closePositionLive, cancelLive, marketTouchLive } from "./liveContext";
 import { activeNetwork } from "./chainEnv";
 import { shuffle } from "./rand";
 
-/** Shown (and logged) wherever automated placement is refused off testnet, until the mainnet confirm
- *  wave lands. One string referenced by both engine guards and the UI, so they never drift. */
-export const TESTNET_ONLY_MSG = "✗ automation is testnet-only until the mainnet confirm step ships.";
+/** Logged when the engine refuses an off-testnet run that wasn't confirmed — the UI's typed-RUN gate is
+ *  the real guard; this backstop catches a non-UI caller. One string so UI + engine never drift. */
+export const MAINNET_UNCONFIRMED_MSG = "✗ mainnet automation needs the typed RUN confirm.";
 
 export interface RoundConfig {
   /** Market id to trade (resolves to a live product; the whole round stays on this one market). */
@@ -25,6 +25,8 @@ export interface RoundConfig {
   maxNotional: number;
   /** The round's side: true → makers buy / takers sell, false → the reverse. Re-rolled per round. */
   makerBuys: boolean;
+  /** Required to run off testnet — the UI sets it only after the per-run typed-RUN confirm. */
+  mainnetConfirmed?: boolean;
 }
 
 export interface RoundHooks {
@@ -55,6 +57,37 @@ const decimals = (tickStr: string): number => {
   const i = tickStr.indexOf(".");
   return i < 0 ? 0 : tickStr.length - i - 1;
 };
+
+/** Consecutive rounds that trade nothing before the continuous loop gives up — tolerates a transient
+ *  tight spread or sequencer blip, but stops when the market can't host a self-cross or every wallet is
+ *  capped. */
+const NO_TRADE_LIMIT = 3;
+
+/** Cumulative spend ceilings for a run (USDT0 notional): per-wallet bounds any single wallet's total,
+ *  per-cohort bounds each side's total. From net.caps; Infinity when unbounded. */
+interface Caps { wallet: number; cohort: number }
+/** Running totals for the current run: notional per wallet, and per cohort side. */
+interface CapState { perWallet: Map<string, number>; maker: number; taker: number }
+
+function freshCapState(): CapState { return { perWallet: new Map(), maker: 0, taker: 0 }; }
+
+/** The reason a pair can't trade without breaching a cumulative cap, or null if it fits. */
+function capReason(maker: WalletVM, taker: WalletVM, notional: number, caps: Caps, state: CapState): string | null {
+  const total = (id: string): number => state.perWallet.get(id) ?? 0;
+  if (total(maker.id) + notional > caps.wallet) return `${short(maker)} at its $${caps.wallet} wallet cap`;
+  if (total(taker.id) + notional > caps.wallet) return `${short(taker)} at its $${caps.wallet} wallet cap`;
+  if (state.maker + notional > caps.cohort) return `maker cohort at its $${caps.cohort} cap`;
+  if (state.taker + notional > caps.cohort) return `taker cohort at its $${caps.cohort} cap`;
+  return null;
+}
+
+/** Add a traded pair's notional to the per-wallet + per-cohort running totals. */
+function bumpCaps(state: CapState, makerId: string, takerId: string, notional: number): void {
+  state.perWallet.set(makerId, (state.perWallet.get(makerId) ?? 0) + notional);
+  state.perWallet.set(takerId, (state.perWallet.get(takerId) ?? 0) + notional);
+  state.maker += notional;
+  state.taker += notional;
+}
 
 /** The self-cross price: a tick STRICTLY inside the spread. A post-only order there does not cross (the
  *  real bid/ask are ≥1 tick away), and an IOC hard-limited to it can fill only against that resting order
@@ -93,13 +126,19 @@ export function buildPairs(makers: readonly WalletVM[], takers: readonly WalletV
 /** Trade one pair, or skip it when the spread can't host a clean self-cross. On ANY outcome the finally
  *  clears a resting maker remainder and flattens both wallets, so a mid-pair failure never leaks a live
  *  order or leaves inventory for the next round. */
-async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: RoundConfig, hooks: RoundHooks): Promise<"traded" | "skipped"> {
+async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: RoundConfig, hooks: RoundHooks, caps: Caps, state: CapState): Promise<"traded" | "skipped"> {
   const px = await selfCrossPrice(maker.id, cfg.market);
   if (!px) {
     hooks.log(`⊘ pair ${i + 1} skipped — spread too tight for a clean self-cross (${short(maker)} ↔ ${short(taker)}).`);
     return "skipped";
   }
   const notional = cfg.minNotional + Math.random() * (cfg.maxNotional - cfg.minNotional);
+  // Cumulative caps: skip (don't place) a pair that would push a wallet or a cohort past its ceiling.
+  const capped = capReason(maker, taker, notional, caps, state);
+  if (capped) {
+    hooks.log(`⊘ pair ${i + 1} skipped — ${capped}.`);
+    return "skipped";
+  }
   const size = notional / px.priceNum;
   const makerSide = cfg.makerBuys ? "buy" : "sell";
   const takerSide = cfg.makerBuys ? "sell" : "buy";
@@ -109,6 +148,7 @@ async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: Rou
     await placeOrderLive(maker.id, cfg.market, { side: makerSide, size, price: px.price, jobId: `${tag}-m`, signal: hooks.signal });
     makerPlaced = true;
     await placeOrderLive(taker.id, cfg.market, { side: takerSide, size, price: px.price, taker: true, jobId: `${tag}-t`, signal: hooks.signal });
+    bumpCaps(state, maker.id, taker.id, notional); // count it only once both legs are in
     hooks.log(`✓ pair ${i + 1}: ${short(maker)} ${makerSide} ↔ ${short(taker)} ${takerSide} · ${notional.toFixed(0)} USDT0 @ ${px.price}`);
     return "traded";
   } finally {
@@ -125,12 +165,12 @@ async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: Rou
 
 /** Run ONE round: trade every maker↔taker pair once, sequentially — the shared per-IP read budget and
  *  the per-wallet nonce lanes make concurrent pairs race, so pairs go one at a time. A pair that throws
- *  is logged and skipped; the round carries on. Testnet-gated: automated order placement on mainnet sits
- *  behind a typed confirm that a later wave adds, so until then the engine refuses off testnet (a backstop
- *  under the UI's own gate, so a non-UI caller can't bypass it). */
-export async function runRound(makers: readonly WalletVM[], takers: readonly WalletVM[], cfg: RoundConfig, hooks: RoundHooks): Promise<RoundResult> {
-  if (!activeNetwork().isTestnet) {
-    hooks.log(TESTNET_ONLY_MSG);
+ *  is logged and skipped; a pair that would breach a cumulative cap is skipped too; the round carries on.
+ *  Off testnet the engine refuses unless cfg.mainnetConfirmed is set (the UI's typed-RUN gate), a backstop
+ *  a non-UI caller can't bypass. caps/state default to unbounded + fresh for a standalone round. */
+export async function runRound(makers: readonly WalletVM[], takers: readonly WalletVM[], cfg: RoundConfig, hooks: RoundHooks, caps: Caps = { wallet: Infinity, cohort: Infinity }, state: CapState = freshCapState()): Promise<RoundResult> {
+  if (!activeNetwork().isTestnet && !cfg.mainnetConfirmed) {
+    hooks.log(MAINNET_UNCONFIRMED_MSG);
     return { pairs: 0, traded: 0, skipped: 0, errors: 0 };
   }
   const pairs = buildPairs(makers, takers);
@@ -143,11 +183,14 @@ export async function runRound(makers: readonly WalletVM[], takers: readonly Wal
   let errors = 0;
   for (let i = 0; i < pairs.length; i++) {
     if (hooks.signal?.aborted) { hooks.log("stopped."); break; }
+    // Re-check the network each pair: a mid-round switch to mainnet (which doesn't carry this run's
+    // confirm) stops the round at the next pair, not after it.
+    if (!activeNetwork().isTestnet && !cfg.mainnetConfirmed) { hooks.log(MAINNET_UNCONFIRMED_MSG); break; }
     const pair = pairs[i]!;
     hooks.onPairStart?.(pair);
     const t0 = Date.now();
     try {
-      const outcome = await runPair(pair, i, cfg, hooks);
+      const outcome = await runPair(pair, i, cfg, hooks, caps, state);
       if (outcome === "traded") traded++; else skipped++;
       hooks.onPairEnd?.(pair, outcome, Date.now() - t0);
     } catch (e) {
@@ -166,24 +209,29 @@ export async function runRound(makers: readonly WalletVM[], takers: readonly Wal
  *  stops within the current pair, not at the end of a long round. Max-throughput by design: no
  *  inter-round delay; the only pacing is the shared per-IP rate budget inside the in-tab primitives. */
 export async function runContinuous(makers: readonly WalletVM[], takers: readonly WalletVM[], base: Omit<RoundConfig, "makerBuys">, hooks: RoundHooks): Promise<void> {
-  if (!activeNetwork().isTestnet) {
-    hooks.log(TESTNET_ONLY_MSG);
+  const net = activeNetwork();
+  if (!net.isTestnet && !base.mainnetConfirmed) {
+    hooks.log(MAINNET_UNCONFIRMED_MSG);
     return;
   }
+  const caps: Caps = { wallet: net.caps.walletUsdt0, cohort: net.caps.cohortUsdt0 };
+  const state = freshCapState();
   let round = 0;
+  let noTrade = 0;
   while (!hooks.signal?.aborted) {
     round++;
     hooks.onRoundStart?.();
     const makerBuys = Math.random() < 0.5;
     hooks.log(`▶ round ${round} — makers ${makerBuys ? "buy" : "sell"}`);
-    const r = await runRound(makers, takers, { ...base, makerBuys }, hooks);
-    // Stop (don't spin) on a round that did zero tradeable work and returned instantly: an empty cohort,
-    // or every pair failing before any I/O (the market lost its live product, or a mid-run switch off
-    // testnet made runRound refuse → pairs:0). A normal round — including an all-SKIP round — does metered
-    // I/O and is paced by the shared limiter, so it keeps looping.
+    const r = await runRound(makers, takers, { ...base, makerBuys }, hooks, caps, state);
+    // Stop when the run can't make progress: an empty cohort, a cohort that hit its cumulative cap, or a
+    // run of consecutive rounds that trade nothing (a tight market or every wallet capped) — a single
+    // transient dead round is tolerated. A normal round keeps looping (the setTimeout(0) yields between).
     if (r.pairs === 0) { hooks.log("■ nothing to trade — stopping."); break; }
-    if (r.traded === 0 && r.skipped === 0) { hooks.log("■ every pair errored — stopping."); break; }
-    await new Promise((resolve) => setTimeout(resolve, 0)); // yield so an abort lands promptly between rounds
+    if (state.maker >= caps.cohort || state.taker >= caps.cohort) { hooks.log(`■ cohort spend cap ($${caps.cohort}) reached — stopping.`); break; }
+    noTrade = r.traded === 0 ? noTrade + 1 : 0;
+    if (noTrade >= NO_TRADE_LIMIT) { hooks.log(`■ no pairs traded in ${NO_TRADE_LIMIT} rounds — stopping.`); break; }
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
   hooks.log("■ stopped.");
 }
