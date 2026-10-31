@@ -29,20 +29,23 @@ async function bootAndSplit(page: Page, placed: string[], opts: { book?: { bids:
   await expect(page.getByRole("button", { name: "Cohort · 1M / 1T" })).toBeVisible({ timeout: 30_000 });
 }
 
-test("automation-round-flow: Run trades the split cohort once (maker rests, taker IOC-crosses) and logs round complete", async ({ page }) => {
+test("automation-round-flow: Run self-crosses each maker↔taker pair (maker rests, taker IOC-crosses)", async ({ page }) => {
   const placed: string[] = [];
   await bootAndSplit(page, placed); // default wide 995/1005 book → an interior tick (~1000) exists
 
   await page.getByRole("button", { name: "Run automation" }).click();
 
-  // The pair's self-cross (maker side ↔ taker side) is logged, then a round-complete tally.
-  await expect(page.getByText(/^✓ pair 1: /)).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText("round complete: 1/1 traded")).toBeVisible();
+  // Run is continuous, so the per-pair line + round tally repeat each round — assert on the first match.
+  await expect(page.getByText(/^✓ pair 1: /).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/^round complete: 1\/1 traded/).first()).toBeVisible();
   // Wiring proof: the pair submitted at least the maker's rest + the taker's cross through the relay.
-  expect(placed.length).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => placed.length, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+
+  await page.getByRole("button", { name: "Pause automation" }).click(); // stop the loop
+  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
 });
 
-test("automation-tight-spread: a 1-tick book has no interior tick, so the pair is SKIPPED — no orders placed", async ({ page }) => {
+test("automation-tight-spread: a 1-tick book has no interior tick, so pairs are SKIPPED — no orders placed", async ({ page }) => {
   const placed: string[] = [];
   // bid 2000.0 / ask 2000.1 — a 1-tick spread (tick 0.1). No tick strictly between → can't self-cross.
   await bootAndSplit(page, placed, {
@@ -54,9 +57,14 @@ test("automation-tight-spread: a 1-tick book has no interior tick, so the pair i
 
   await page.getByRole("button", { name: "Run automation" }).click();
 
-  await expect(page.getByText(/^⊘ pair 1 skipped/)).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText("round complete: 0/1 traded, 1 skipped")).toBeVisible();
-  // The tight spread is detected BEFORE any order is built, so nothing reached the relay.
+  // A skip does metered I/O (the book read), so the continuous loop keeps skipping round after round
+  // rather than self-stopping — assert on the first skip, then pause.
+  await expect(page.getByText(/^⊘ pair 1 skipped/).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/^round complete: 0\/1 traded, 1 skipped/).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Pause automation" }).click(); // stop the loop
+  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
+  // The tight spread is detected BEFORE any order is built, so nothing ever reached the relay.
   expect(placed.length).toBe(0);
 });
 
@@ -73,4 +81,21 @@ test("automation-mainnet-gate: switching to mainnet disables Run until the typed
   await expect(page.getByText("Testnet only — mainnet automation ships with its confirm step.")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Run automation" })).toBeDisabled();
   expect(placed.length).toBe(0);
+});
+
+test("automation-run-pause: Run starts continuous rounds; Pause stops them", async ({ page }) => {
+  const placed: string[] = [];
+  await bootAndSplit(page, placed); // testnet, 1M/1T, wide book
+
+  // Start → the toggle flips to Pause and rounds begin submitting orders through the relay.
+  await page.getByRole("button", { name: "Run automation" }).click();
+  await expect(page.getByRole("button", { name: "Pause automation" })).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => placed.length, { timeout: 30_000 }).toBeGreaterThan(0);
+
+  // Pause → the loop aborts, the toggle returns to Run, and it logs that it stopped. (That the in-flight
+  // pair's cleanup still FLATTENS on abort — cancel + reduce-only with no signal — is only provable with
+  // real positions, i.e. OUTRIGHT on live testnet via NADO_LIVE; the mocked sequencer holds no position.)
+  await page.getByRole("button", { name: "Pause automation" }).click();
+  await expect(page.getByRole("button", { name: "Run automation" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("■ stopped.")).toBeVisible();
 });

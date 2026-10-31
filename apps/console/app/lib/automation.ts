@@ -13,6 +13,10 @@ import { placeOrderLive, closePositionLive, cancelLive, marketTouchLive } from "
 import { activeNetwork } from "./chainEnv";
 import { shuffle } from "./rand";
 
+/** Shown (and logged) wherever automated placement is refused off testnet, until the mainnet confirm
+ *  wave lands. One string referenced by both engine guards and the UI, so they never drift. */
+export const TESTNET_ONLY_MSG = "✗ automation is testnet-only until the mainnet confirm step ships.";
+
 export interface RoundConfig {
   /** Market id to trade (resolves to a live product; the whole round stays on this one market). */
   market: string;
@@ -102,11 +106,14 @@ async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: Rou
     hooks.log(`✓ pair ${i + 1}: ${short(maker)} ${makerSide} ↔ ${short(taker)} ${takerSide} · ${notional.toFixed(0)} USDT0 @ ${px.price}`);
     return "traded";
   } finally {
-    // The taker's IOC never rests, so only the maker can leave a resting remainder — cancel it before the
-    // flatten reads the position. Flatten both (reduce-only crossing IOC; a no-op when already flat).
-    if (makerPlaced) await cancelLive(maker.id, cfg.market, undefined, hooks.signal).catch(() => {});
-    await closePositionLive(maker.id, cfg.market, hooks.signal).catch((e) => hooks.log(`⚠ flatten ${short(maker)} failed: ${(e as Error).message}`));
-    await closePositionLive(taker.id, cfg.market, hooks.signal).catch((e) => hooks.log(`⚠ flatten ${short(taker)} failed: ${(e as Error).message}`));
+    // Cleanup must NOT be cancellable by the same abort that triggers a Pause — otherwise a mid-pair
+    // Pause would strand a resting maker order and un-flattened inventory. So the cancel + flattens run
+    // with NO signal: abort stops NEW work, never the cleanup of work already placed. The taker's IOC
+    // never rests, so only the maker can leave a resting remainder — cancel it before the flatten reads
+    // the position; then flatten both (reduce-only crossing IOC; a no-op when already flat).
+    if (makerPlaced) await cancelLive(maker.id, cfg.market).catch(() => {});
+    await closePositionLive(maker.id, cfg.market).catch((e) => hooks.log(`⚠ flatten ${short(maker)} failed: ${(e as Error).message}`));
+    await closePositionLive(taker.id, cfg.market).catch((e) => hooks.log(`⚠ flatten ${short(taker)} failed: ${(e as Error).message}`));
   }
 }
 
@@ -117,7 +124,7 @@ async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: Rou
  *  under the UI's own gate, so a non-UI caller can't bypass it). */
 export async function runRound(makers: readonly WalletVM[], takers: readonly WalletVM[], cfg: RoundConfig, hooks: RoundHooks): Promise<RoundResult> {
   if (!activeNetwork().isTestnet) {
-    hooks.log("✗ automation is testnet-only until the mainnet confirm step ships.");
+    hooks.log(TESTNET_ONLY_MSG);
     return { pairs: 0, traded: 0, skipped: 0, errors: 0 };
   }
   const pairs = buildPairs(makers, takers);
@@ -139,4 +146,31 @@ export async function runRound(makers: readonly WalletVM[], takers: readonly Wal
   }
   hooks.log(`round complete: ${traded}/${pairs.length} traded${skipped ? `, ${skipped} skipped` : ""}${errors ? `, ${errors} error(s)` : ""}`);
   return { pairs: pairs.length, traded, skipped, errors };
+}
+
+/** Run rounds back to back until the signal aborts — the continuous benchmark loop behind the Run/Pause
+ *  toggle. The round SIDE is re-rolled each round (so the maker cohort alternates between buying and
+ *  selling over time), and abort is honored between rounds AND, via runRound, between pairs — so Pause
+ *  stops within the current pair, not at the end of a long round. Max-throughput by design: no
+ *  inter-round delay; the only pacing is the shared per-IP rate budget inside the in-tab primitives. */
+export async function runContinuous(makers: readonly WalletVM[], takers: readonly WalletVM[], base: Omit<RoundConfig, "makerBuys">, hooks: RoundHooks): Promise<void> {
+  if (!activeNetwork().isTestnet) {
+    hooks.log(TESTNET_ONLY_MSG);
+    return;
+  }
+  let round = 0;
+  while (!hooks.signal?.aborted) {
+    round++;
+    const makerBuys = Math.random() < 0.5;
+    hooks.log(`▶ round ${round} — makers ${makerBuys ? "buy" : "sell"}`);
+    const r = await runRound(makers, takers, { ...base, makerBuys }, hooks);
+    // Stop (don't spin) on a round that did zero tradeable work and returned instantly: an empty cohort,
+    // or every pair failing before any I/O (the market lost its live product, or a mid-run switch off
+    // testnet made runRound refuse → pairs:0). A normal round — including an all-SKIP round — does metered
+    // I/O and is paced by the shared limiter, so it keeps looping.
+    if (r.pairs === 0) { hooks.log("■ nothing to trade — stopping."); break; }
+    if (r.traded === 0 && r.skipped === 0) { hooks.log("■ every pair errored — stopping."); break; }
+    await new Promise((resolve) => setTimeout(resolve, 0)); // yield so an abort lands promptly between rounds
+  }
+  hooks.log("■ stopped.");
 }

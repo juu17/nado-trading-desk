@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Input, Select, Text } from "@cloudflare/kumo";
-import { PlayIcon } from "@phosphor-icons/react";
+import { PauseIcon, PlayIcon } from "@phosphor-icons/react";
 import type { WalletVM } from "@farm/ui";
 import type { Market } from "@farm/adapter-api";
 import { setWalletCohort } from "../lib/custody";
-import { runRound } from "../lib/automation";
+import { runContinuous, TESTNET_ONLY_MSG } from "../lib/automation";
 import { shuffle } from "../lib/rand";
 import { useNetwork } from "./NetworkProvider";
 
@@ -14,9 +14,9 @@ import { useNetwork } from "./NetworkProvider";
 const symbolOf = (id: string) => id.split(":").pop() ?? id;
 
 /** The sidebar Trading-strategy controls: the min–max per-pair volume, the market picker, the "Cohort"
- *  pre-step (random 50/50 split of un-cohorted wallets into maker/taker), and "Run automation" — one
- *  self-cross round over the split cohort. Cohort first, then run. Automated order placement is
- *  testnet-only until the mainnet confirm step ships (a later wave); the metrics tiles fill in then too. */
+ *  pre-step (random 50/50 split of un-cohorted wallets into maker/taker), and the Run/Pause toggle that
+ *  runs continuous self-cross rounds over the split cohort. Cohort first, then run. Automated order
+ *  placement is testnet-only until the mainnet confirm step ships (a later wave); metrics fill in then. */
 export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = false }: {
   wallets: WalletVM[];
   markets: Market[];
@@ -30,6 +30,7 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
   const [running, setRunning] = useState(false); // a round is in flight
   const [log, setLog] = useState<string[]>([]);
   const { net } = useNetwork();
+  const abortRef = useRef<AbortController | null>(null); // the in-flight continuous loop, so Pause can stop it
 
   // Keep a valid market selected as the live market list arrives. Default to BTC-PERP by its EXACT symbol
   // (the part after the ":", same as the option label) — `endsWith("BTC-PERP")` would also catch
@@ -76,29 +77,35 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
     }
   };
 
-  // Run ONE self-cross round over the split cohort: pair each maker with a taker, cross at a tick inside
-  // the spread, flatten. The volume range + the per-order notional cap are validated HERE (the first
-  // place they're consumed), placement is refused off testnet, and the round side is re-rolled each run.
-  // Continuous rounds + a pause control arrive in the next wave.
-  const runAutomation = async () => {
+  // Start/stop the continuous self-cross loop (the Run/Pause toggle). On start we validate the volume
+  // range + the per-order cap (the first place they're consumed), refuse off testnet, then run rounds
+  // until Pause aborts the loop via its AbortController. The engine flattens every pair, so a pause
+  // leaves the cohort flat; each round re-rolls the side.
+  const toggleAutomation = async () => {
+    // Pause/guard on the ref (set synchronously), NOT `running` (which commits a frame later) — so a fast
+    // double-click can't start a second loop and orphan the first, and a click while a loop runs always
+    // pauses it (the button stays enabled while running for exactly this).
+    if (abortRef.current) { abortRef.current.abort(); return; }
     const min = Number(minVol);
     const max = Number(maxVol);
-    if (!net.isTestnet) { append("✗ automation is testnet-only until the mainnet confirm step ships."); return; }
+    if (!net.isTestnet) { append(TESTNET_ONLY_MSG); return; }
     if (!(min > 0) || !(max >= min)) { append(`✗ volume range invalid — need 0 < min ≤ max (got ${minVol}–${maxVol}).`); return; }
     if (max > net.caps.orderNotionalUsdt0) { append(`✗ max volume ${max} exceeds the per-order cap ${net.caps.orderNotionalUsdt0} USDT0.`); return; }
     if (!market) { append("✗ pick a market first."); return; }
     const makers = wallets.filter((w) => w.cohort === "maker");
     const takers = wallets.filter((w) => w.cohort === "taker");
     if (makers.length === 0 || takers.length === 0) { append("✗ run Cohort first — need ≥1 maker and ≥1 taker."); return; }
-    const makerBuys = Math.random() < 0.5;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     setRunning(true);
-    append(`▶ round: ${Math.min(makers.length, takers.length)} pair(s), makers ${makerBuys ? "buy" : "sell"} @ ${symbolOf(market)}`);
+    append(`▶ start — ${Math.min(makers.length, takers.length)} pair(s)/round @ ${symbolOf(market)}`);
     try {
-      await runRound(makers, takers, { market, minNotional: min, maxNotional: max, makerBuys }, { log: append });
+      await runContinuous(makers, takers, { market, minNotional: min, maxNotional: max }, { log: append, signal: ctrl.signal });
     } catch (e) {
-      append(`✗ round aborted: ${(e as Error).message}`);
+      append(`✗ automation error: ${(e as Error).message}`);
     } finally {
       setRunning(false);
+      abortRef.current = null;
       onWalletChanged?.();
     }
   };
@@ -129,12 +136,13 @@ export function TradingStrategy({ wallets, markets, onWalletChanged, isLive = fa
         <Text variant="secondary" size="xs">Step 1 — split un-cohorted wallets 50/50 before running.</Text>
       </div>
 
-      {/* Point 4 — Run automation. One self-cross round over the split cohort; disabled until a cohort
-          exists, while a round is in flight, and off testnet (mainnet automation needs its confirm step,
-          a later wave). The play/pause toggle + continuous rounds also come next wave. */}
+      {/* Point 4 — the Run/Pause toggle: continuous self-cross rounds over the split cohort. Idle shows a
+          play icon in the brand fill; running shows a pause icon in the neutral fill. Disabled until a
+          cohort exists and off testnet (mainnet automation needs its confirm step, a later wave) — but it
+          stays clickable WHILE running so it can pause. */}
       <div className="flex flex-col gap-1">
-        <Button size="sm" variant="primary" icon={PlayIcon} loading={running} disabled={!net.isTestnet || makerCount === 0 || takerCount === 0} onClick={runAutomation}>
-          Run automation
+        <Button size="sm" variant={running ? "secondary" : "primary"} icon={running ? PauseIcon : PlayIcon} disabled={!running && (!net.isTestnet || makerCount === 0 || takerCount === 0)} onClick={toggleAutomation}>
+          {running ? "Pause automation" : "Run automation"}
         </Button>
         {!net.isTestnet && <Text variant="secondary" size="xs">Testnet only — mainnet automation ships with its confirm step.</Text>}
       </div>
