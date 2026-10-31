@@ -2,15 +2,13 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Badge, Banner, Button, Collapsible, Grid, InlineCopyText, Input, LayerCard, Loader, Text, cn } from "@cloudflare/kumo";
-import { CheckCircleIcon, XCircleIcon, XIcon } from "@phosphor-icons/react";
+import { Badge, Button, Collapsible, Grid, InlineCopyText, Input, LayerCard, Loader, Text, cn } from "@cloudflare/kumo";
+import { XIcon } from "@phosphor-icons/react";
 import type { WalletVM } from "@farm/ui";
 import type { Order, Position, Market, Balance } from "@farm/adapter-api";
 import { MARKETS } from "../lib/runtime";
 import { depositLive, withdrawLive, refuelGasLive, mintUsdt0Live, depositAddressLive, TREASURY_WALLET_ID, DEFAULT_REFUEL_ETH } from "../lib/liveContext";
 import type { LiveEvent } from "../lib/liveStream";
-import { runInBrowserCustody } from "../lib/custodyLab";
-import type { CustodyLabResult } from "../lib/custodyLab";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { OrderTicket, useOrderTicket } from "./OrderTicket";
 import { AccountKindBadge } from "./AccountKindBadge";
@@ -81,9 +79,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
   const [pending, setPending] = useState<null | "deposit" | "withdraw" | "refuel" | "mint">(null);
   const [log, setLog] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [lab, setLab] = useState<CustodyLabResult | null>(null);
-  const [labBusy, setLabBusy] = useState(false);
-  const [labErr, setLabErr] = useState<string | null>(null);
   const [dda, setDda] = useState<string | null>(null); // this wallet's Nado direct-deposit address
   const [balancesOpen, setBalancesOpen] = useState(true); // the Balances list is collapsible
 
@@ -181,13 +176,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
     else if (p === "mint") void doMint();
   };
 
-  const runLab = async () => {
-    setLabBusy(true); setLabErr(null);
-    try { setLab(await runInBrowserCustody()); }
-    catch (e) { setLabErr((e as Error).message); }
-    finally { setLabBusy(false); }
-  };
-
   // Balances ordered so a NON-ZERO balance ranks above a zero one (then larger first); zeros sink.
   const sortedBalances = [...(balances ?? [])].sort((a, b) => {
     const na = Number(a.total) || 0, nb = Number(b.total) || 0;
@@ -235,34 +223,21 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                 <Stat label="Readiness" value={wallet.readiness} />
               </Grid>
 
+              {/* Deposit address (Nado DDA) — swapped up to sit right under the stats (was near the foot). */}
               {isLive && (
-                <LayerCard className="shrink-0 p-4">
-                  {/* Kumo Collapsible: the trigger is a button named "Balances (N)"; the panel UNMOUNTS
-                      when closed (default — never keepMounted), which the e2e relies on. */}
-                  <Collapsible.Root open={balancesOpen} onOpenChange={setBalancesOpen}>
-                    <Collapsible.DefaultTrigger>Balances{sortedBalances.length ? ` (${sortedBalances.length})` : ""}</Collapsible.DefaultTrigger>
-                    <Collapsible.Panel className="mt-3">
-                      {sortedBalances.length > 0 ? (
-                        <ul className="flex flex-col gap-1 font-mono text-sm">
-                          {sortedBalances.map((b, i) => (
-                            <li key={`${b.asset}-${b.scope ?? ""}-${i}`} className="flex items-center justify-between gap-2">
-                              <span className="min-w-0 truncate">
-                                {b.symbol || b.asset}{b.scope ? <span className="text-kumo-subtle"> · {b.scope}</span> : null}
-                              </span>
-                              <span className="shrink-0 tabular-nums">
-                                {b.total}
-                                {b.available !== b.total ? <span className="text-kumo-subtle"> · {b.available} avail</span> : null}
-                                {b.usdValue ? <span className="text-kumo-subtle"> · ${b.usdValue}</span> : null}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <Text variant="secondary" size="xs">No collateral balances yet — deposit{net.isTestnet ? " or mint" : ""} USDT0 to fund this wallet&apos;s subaccount.</Text>
-                      )}
-                    </Collapsible.Panel>
-                  </Collapsible.Root>
-                </LayerCard>
+                <Section title="Deposit address (Nado DDA)">
+                  {dda ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <div data-testid="dda-qr" className="rounded-lg bg-kumo-base p-2 ring ring-kumo-hairline"><QRCodeSVG value={dda} size={132} /></div>
+                      <InlineCopyText value={dda} truncate={false} className="w-full break-all text-left" labels={{ copyAction: "Copy DDA", copied: "DDA copied" }}>
+                        {dda}
+                      </InlineCopyText>
+                      <Text variant="secondary" size="xs">Send USDT0 on Ink to this address to fund this wallet&apos;s subaccount — an alternative to an on-chain deposit.</Text>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-kumo-subtle"><Loader size="sm" /> Fetching the deposit address…</div>
+                  )}
+                </Section>
               )}
 
               {isLive && positions && positions.length > 0 && (
@@ -295,10 +270,14 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                 </Section>
               )}
 
+              {/* The order ticket: entry controls + the 4 action buttons live in one "Order box"; the order
+                  book is its own section below it. */}
               <OrderTicket wallet={wallet} isLive={isLive} marketOptions={marketOptions} onActivity={append}>
-                <Section title="Order entry"><OrderTicket.Entry /></Section>
+                <Section title="Order box">
+                  <OrderTicket.Entry />
+                  <OrderTicket.Actions />
+                </Section>
                 {isLive && <BookSection />}
-                <Section title="Actions"><OrderTicket.Actions /></Section>
               </OrderTicket>
 
               {isLive && (
@@ -315,22 +294,23 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                     </div>
                   )}
                   <Text variant="secondary" size="xs">Deposit = on-chain approve + depositCollateral, built and signed in this tab and broadcast by a keyless client; withdraw = a Nado EIP-712 signed in-tab then relayed. The server holds no key — funding, orders and reads all sign in your browser.</Text>
-                </Section>
-              )}
 
-              {isLive && (
-                <Section title="Gas refuel (native ETH)">
-                  {isTreasury ? (
-                    <Text variant="secondary">This is the gas {em("treasury")} ({TREASURY_WALLET_ID}) — the source wallet for refuels. Fund it externally; it cannot refuel itself.</Text>
-                  ) : (
-                    <>
-                      <div className="flex items-end gap-2">
-                        <div className="min-w-0 flex-1"><Input label="ETH amount" value={gasAmount} onChange={(e) => setGasAmount(e.target.value)} /></div>
-                        <Button onClick={() => setPending("refuel")} disabled={busy}>Refuel gas</Button>
-                      </div>
-                      <Text variant="secondary" size="xs">Sends native ETH from the treasury ({TREASURY_WALLET_ID}) to this wallet so it can run the on-chain funding bootstrap (approve + deposit). Signed by the treasury&apos;s sealed key in this tab, broadcast by a keyless client; serialized on the treasury nonce.</Text>
-                    </>
-                  )}
+                  {/* Gas refuel (native ETH) — merged into the Funding card: collateral (USDT0) and gas (ETH)
+                      are the two things a wallet needs funded, so they share one card now. */}
+                  <div className="flex flex-col gap-3 border-t border-kumo-line pt-3">
+                    <span className="text-sm font-medium">Gas refuel (native ETH)</span>
+                    {isTreasury ? (
+                      <Text variant="secondary">This is the gas {em("treasury")} ({TREASURY_WALLET_ID}) — the source wallet for refuels. Fund it externally; it cannot refuel itself.</Text>
+                    ) : (
+                      <>
+                        <div className="flex items-end gap-2">
+                          <div className="min-w-0 flex-1"><Input label="ETH amount" value={gasAmount} onChange={(e) => setGasAmount(e.target.value)} /></div>
+                          <Button onClick={() => setPending("refuel")} disabled={busy}>Refuel gas</Button>
+                        </div>
+                        <Text variant="secondary" size="xs">Sends native ETH from the treasury ({TREASURY_WALLET_ID}) to this wallet so it can run the on-chain funding bootstrap (approve + deposit). Signed by the treasury&apos;s sealed key in this tab, broadcast by a keyless client; serialized on the treasury nonce.</Text>
+                      </>
+                    )}
+                  </div>
                 </Section>
               )}
 
@@ -349,24 +329,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                 </Section>
               )}
 
-              {isLive && (
-                <Section title="In-browser custody lab (fresh wallet)">
-                  <Text variant="secondary" size="xs">Generates a new wallet entirely in the browser (wative browser build, IndexedDB) and signs a Nado-shaped order client-side — the key never leaves the browser. Separate from the funded server wallet; the 1000-wallet custody path.</Text>
-                  <div><Button loading={labBusy} onClick={runLab}>Generate &amp; sign in-browser</Button></div>
-                  {labErr && <Banner variant="error" size="sm" icon={<XCircleIcon weight="fill" />} description={labErr} />}
-                  {lab && (
-                    <ul className="flex flex-col gap-1 font-mono">
-                      <li>addr <span className="text-kumo-subtle">{lab.address.slice(0, 10)}…{lab.address.slice(-6)}</span></li>
-                      <li>sig <span className="text-kumo-subtle">{lab.signature.slice(0, 18)}…</span></li>
-                      <li className={cn("flex items-center gap-1.5", lab.match ? "text-kumo-success" : "text-kumo-danger")}>
-                        {lab.match ? <CheckCircleIcon className="shrink-0" /> : <XCircleIcon className="shrink-0" />}
-                        {lab.match ? "recovered == signer (in-browser EIP-712 verified)" : "recovery mismatch"}
-                      </li>
-                    </ul>
-                  )}
-                </Section>
-              )}
-
               <Section title="Activity">
                 {log.length === 0 ? (
                   <Text variant="secondary" size="xs">{isLive ? "Live orders sign in this browser tab (in-tab key) and relay to the real sequencer — the server holds no order key." : "No actions yet — each runs through the real NadoAdapter + plan runner (EIP-712 build → sign → mock gateway)."}</Text>
@@ -380,20 +342,35 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                 )}
               </Section>
 
+              {/* Balances — swapped down to the foot (was right under the stats). */}
               {isLive && (
-                <Section title="Deposit address (Nado DDA)">
-                  {dda ? (
-                    <div className="flex flex-col items-center gap-2">
-                      <div data-testid="dda-qr" className="rounded-lg bg-kumo-base p-2 ring ring-kumo-hairline"><QRCodeSVG value={dda} size={132} /></div>
-                      <InlineCopyText value={dda} truncate={false} className="w-full break-all text-left" labels={{ copyAction: "Copy DDA", copied: "DDA copied" }}>
-                        {dda}
-                      </InlineCopyText>
-                      <Text variant="secondary" size="xs">Send USDT0 on Ink to this address to fund this wallet&apos;s subaccount — an alternative to an on-chain deposit.</Text>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 text-kumo-subtle"><Loader size="sm" /> Fetching the deposit address…</div>
-                  )}
-                </Section>
+                <LayerCard className="shrink-0 p-4">
+                  {/* Kumo Collapsible: the trigger is a button named "Balances (N)"; the panel UNMOUNTS
+                      when closed (default — never keepMounted), which the e2e relies on. */}
+                  <Collapsible.Root open={balancesOpen} onOpenChange={setBalancesOpen}>
+                    <Collapsible.DefaultTrigger>Balances{sortedBalances.length ? ` (${sortedBalances.length})` : ""}</Collapsible.DefaultTrigger>
+                    <Collapsible.Panel className="mt-3">
+                      {sortedBalances.length > 0 ? (
+                        <ul className="flex flex-col gap-1 font-mono text-sm">
+                          {sortedBalances.map((b, i) => (
+                            <li key={`${b.asset}-${b.scope ?? ""}-${i}`} className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 truncate">
+                                {b.symbol || b.asset}{b.scope ? <span className="text-kumo-subtle"> · {b.scope}</span> : null}
+                              </span>
+                              <span className="shrink-0 tabular-nums">
+                                {b.total}
+                                {b.available !== b.total ? <span className="text-kumo-subtle"> · {b.available} avail</span> : null}
+                                {b.usdValue ? <span className="text-kumo-subtle"> · ${b.usdValue}</span> : null}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <Text variant="secondary" size="xs">No collateral balances yet — deposit{net.isTestnet ? " or mint" : ""} USDT0 to fund this wallet&apos;s subaccount.</Text>
+                      )}
+                    </Collapsible.Panel>
+                  </Collapsible.Root>
+                </LayerCard>
               )}
 
               <div className="mt-auto flex shrink-0 flex-wrap gap-1">
