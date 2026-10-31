@@ -39,8 +39,11 @@ export const WalletCard = memo(function WalletCard({ wallet, selected, onSelect 
       <div className="flex items-center justify-between gap-2">
         <AccountKindBadge kind={wallet.accountKind}>{wallet.accountName}</AccountKindBadge>
         <div className="flex shrink-0 items-center gap-1.5">
-          {wallet.cohort && <Badge variant="secondary" className="capitalize">{wallet.cohort}</Badge>}
-          <Badge variant={statusVariant}>{statusLabel}</Badge>
+          {/* Cohort gets its own fill so maker vs taker reads at a glance: maker = info (blue),
+              taker = warning (amber) — a high-contrast, colorblind-safe pair. */}
+          {wallet.cohort && <Badge variant={wallet.cohort === "maker" ? "info" : "warning"} className="capitalize">{wallet.cohort}</Badge>}
+          {/* "Active" is the norm for a live wallet and carries no signal — badge only the exceptions. */}
+          {wallet.status !== "active" && <Badge variant={statusVariant}>{statusLabel}</Badge>}
         </div>
       </div>
       <div className="font-mono text-sm text-kumo-subtle">#{wallet.index} · {short(wallet.address.value)}</div>
