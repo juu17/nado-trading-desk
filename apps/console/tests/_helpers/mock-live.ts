@@ -66,6 +66,9 @@ export interface RelayOpts {
   /** Override the order book the `market_liquidity` read returns (raw [price_x18, size_x18] ticks). A
    *  test uses this to land a specific spread — e.g. a 1-tick book the self-cross engine must skip. */
   book?: { bids: [string, string][]; asks: [string, string][] };
+  /** x18 quote-margin collateral every subaccount reports → wallets are `funded` (+ gas via
+   *  mockNativeRpc → `ready`). Default (unset) → empty balances → `unfunded`. */
+  collateral?: string;
 }
 
 // The write actions the keyless relay forwards to the sequencer's `/execute` (ALLOW set in the route). An
@@ -94,10 +97,34 @@ function rawOrder(sender: string, i: number): Record<string, unknown> {
  *  Shapes checked against @nadohq/engine-client@0.58.0 queryDataMappers: `subaccount_info` needs the
  *  3-entry `healths` tuple (read unconditionally, even when balances are empty); `orders` needs
  *  `product_orders`; `market_price` needs ask_x18/bid_x18. */
-function relayData(body: RelayQuery, orders?: Map<string, number>, book?: { bids: [string, string][]; asks: [string, string][] }): unknown {
+// A spot product (product 0 = the USDT0 quote) in the shape the engine-client's mapSubaccountSummary
+// requires for a funded balance — it throws without a matching product per balance. Values are inert
+// x18 placeholders (1e18 where a multiplier must be non-zero); readiness only reads the balance amount.
+/** Funding literals for the automation specs: 1000 USDT0 collateral (x18) and 0.001 ETH gas (≥ the
+ *  readiness floor) → a wallet reports funded/ready and is eligible to trade. */
+export const FUNDED_COLLATERAL_X18 = "1000000000000000000000";
+export const READY_GAS_WEI = 1_000_000_000_000_000n;
+
+const ONE_X18 = "1000000000000000000";
+function fundedSpotProduct(productId: number): Record<string, unknown> {
+  return {
+    product_id: productId,
+    book_info: { min_size: "0", price_increment_x18: ONE_X18, size_increment: ONE_X18 },
+    state: { total_borrows_normalized: "0", cumulative_borrows_multiplier_x18: ONE_X18, total_deposits_normalized: "0", cumulative_deposits_multiplier_x18: ONE_X18 },
+    oracle_price_x18: ONE_X18,
+    config: { interest_floor_x18: "0", interest_inflection_util_x18: "0", interest_large_cap_x18: "0", interest_small_cap_x18: "0", min_deposit_rate_x18: "0", token: "0x0000000000000000000000000000000000000000" },
+    risk: { long_weight_initial_x18: ONE_X18, long_weight_maintenance_x18: ONE_X18, short_weight_initial_x18: ONE_X18, short_weight_maintenance_x18: ONE_X18 },
+  };
+}
+
+function relayData(body: RelayQuery, orders?: Map<string, number>, book?: { bids: [string, string][]; asks: [string, string][] }, collateral?: string): unknown {
   switch (body?.type) {
     case "subaccount_info":
-      return { exists: true, spot_balances: [], perp_balances: [], spot_products: [], perp_products: [], health_contributions: {}, healths: THREE_ZERO_HEALTHS };
+      // A quote spot balance (product 0) of `collateral` x18 makes the wallet funded (+ gas via
+      // mockNativeRpc → ready). Default: empty balances → unfunded.
+      return collateral
+        ? { exists: true, spot_balances: [{ product_id: 0, balance: { amount: collateral } }], perp_balances: [], spot_products: [fundedSpotProduct(0)], perp_products: [], health_contributions: { 0: ["0", "0", "0"] }, healths: THREE_ZERO_HEALTHS }
+        : { exists: true, spot_balances: [], perp_balances: [], spot_products: [], perp_products: [], health_contributions: {}, healths: THREE_ZERO_HEALTHS };
     case "orders": {
       const n = orders?.get((body.sender ?? "").toLowerCase()) ?? 0;
       const productId = body.product_ids?.[0] ?? 2;
@@ -148,7 +175,7 @@ export async function mockRelay(page: Page, opts: RelayOpts = {}): Promise<void>
     const body = raw as RelayQuery;
     opts.onQuery?.(body);
     if (body.type === "market_liquidity" && opts.bookGate) await opts.bookGate;
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "success", data: relayData(body, opts.orders, opts.book) }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "success", data: relayData(body, opts.orders, opts.book, opts.collateral) }) });
   });
 }
 

@@ -9,18 +9,27 @@
 // =============================================================================
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { mockState, mockRelay, mockNativeRpc, MockSequencer, unlockGeneratedCohort, liveConfig } from "../_helpers/mock-live";
+import { mockState, mockRelay, mockNativeRpc, MockSequencer, unlockGeneratedCohort, liveConfig, FUNDED_COLLATERAL_X18, READY_GAS_WEI } from "../_helpers/mock-live";
 
 // BTC-PERP in the market picker (the canned config ships products but an EMPTY markets list), so the
 // default-market effect selects it; the engine resolves it to the canned product (tick 0.1).
 const MARKET = { id: "nado:perp:BTC-PERP", symbol: "BTC-PERP", kind: "perp", tickSize: "0.1", minSize: "0.001" };
 
 /** Boot a 3-wallet cohort and split it → 1 maker + 1 taker (+1 unassigned) → one maker↔taker pair. */
-async function bootAndSplit(page: Page, placed: string[], opts: { book?: { bids: [string, string][]; asks: [string, string][] } } = {}) {
+async function bootAndSplit(page: Page, placed: string[], opts: { book?: { bids: [string, string][]; asks: [string, string][] }; collateral?: string; gas?: bigint; failFirst?: number } = {}) {
   await new MockSequencer().install(page);
   await mockState(page, liveConfig({ markets: [MARKET] }));
-  await mockRelay(page, { book: opts.book, onExecute: (kind) => { if (kind === "place_order") placed.push(kind); } });
-  await mockNativeRpc(page);
+  // Wallets need collateral to be eligible, so default them funded; pass collateral:"" for the
+  // eligibility test (unfunded → skipped). failFirst makes the first N place_orders fail (retry).
+  const collateral = opts.collateral ?? FUNDED_COLLATERAL_X18;
+  let fails = opts.failFirst ?? 0;
+  await mockRelay(page, {
+    book: opts.book,
+    collateral,
+    placeOrderFails: opts.failFirst ? () => fails-- > 0 : undefined,
+    onExecute: (kind) => { if (kind === "place_order") placed.push(kind); },
+  });
+  await mockNativeRpc(page, { defaultWei: opts.gas ?? READY_GAS_WEI });
 
   await page.goto("/");
   await unlockGeneratedCohort(page); // 3 in-tab wallets, all un-cohorted
@@ -31,6 +40,9 @@ async function bootAndSplit(page: Page, placed: string[], opts: { book?: { bids:
   // preview carries (testnet's default is generous, but keep these tests independent of the ambient cap).
   await page.getByLabel("Min volume per pair").fill("2");
   await page.getByLabel("Max volume per pair").fill("5");
+  // When funded, wait for the balance reconcile to land so every wallet is eligible (not "unfunded") at
+  // Run — eligibility snapshots readiness at click time.
+  if (collateral) await expect(page.getByText(/^unfunded$/)).toHaveCount(0, { timeout: 30_000 });
 }
 
 test("automation-round-flow: Run self-crosses each maker↔taker pair (maker rests, taker IOC-crosses)", async ({ page }) => {
@@ -117,6 +129,47 @@ test("automation-metrics: a run increments the live Pairs metric (and the filmst
   await expect
     .poll(async () => Number((await page.getByTestId("metric-pairs").textContent()) ?? "0"), { timeout: 30_000 })
     .toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Pause automation" }).click();
+  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
+});
+
+test("automation-eligibility: un-ready wallets are reported not eligible and the run stops (nothing placed)", async ({ page }) => {
+  const placed: string[] = [];
+  await bootAndSplit(page, placed, { collateral: "" }); // no collateral → wallets unfunded → ineligible
+
+  await page.getByRole("button", { name: "Run automation" }).click();
+
+  // Each wallet is reported not eligible, and with none eligible the run stops before placing anything.
+  await expect(page.getByText(/not eligible — no collateral/).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("■ no eligible maker/taker pair — stopping.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Run automation" })).toBeVisible();
+  expect(placed.length).toBe(0);
+});
+
+test("automation-retry: a transient placement failure is retried, then the pair trades", async ({ page }) => {
+  const placed: string[] = [];
+  await bootAndSplit(page, placed, { failFirst: 1 }); // the first place_order fails once → the pair retries
+
+  await page.getByRole("button", { name: "Run automation" }).click();
+
+  // The first attempt fails and is retried; the retry trades the pair.
+  await expect(page.getByText(/↻ pair 1 retry/).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/^✓ pair 1: /).first()).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "Pause automation" }).click();
+  await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });
+});
+
+test("automation-eligibility-funded: a funded wallet with no gas is eligible (orders are gasless) and trades", async ({ page }) => {
+  const placed: string[] = [];
+  await bootAndSplit(page, placed, { gas: 0n }); // collateral but no gas → readiness "funded", not "ready"
+
+  await page.getByRole("button", { name: "Run automation" }).click();
+
+  // "funded" (collateral, no gas) is eligible, so the pair still trades.
+  await expect(page.getByText(/^✓ pair 1: /).first()).toBeVisible({ timeout: 30_000 });
 
   await page.getByRole("button", { name: "Pause automation" }).click();
   await expect(page.getByText("■ stopped.")).toBeVisible({ timeout: 30_000 });

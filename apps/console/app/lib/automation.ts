@@ -6,8 +6,11 @@
 // Each traded pair then flattens and clears any resting remainder, so the next round starts flat.
 //
 // This is the lean in-tab loop over the liveContext primitives — no node coordinator — driven by the
-// sidebar's Run/Pause toggle: continuous rounds with per-wallet + per-cohort cumulative caps, and a
-// per-run typed-RUN confirm off testnet. Eligibility gating (skip not-ready wallets) is a follow-up.
+// sidebar's Run/Pause toggle: continuous rounds with per-wallet + per-cohort cumulative caps, a per-run
+// typed-RUN confirm off testnet, and eligibility gating. Eligibility admits wallets WITH COLLATERAL
+// (readiness funded|ready), not strict "ready": Nado orders are gasless, so collateral is the real
+// requirement, and gas is stale-while-revalidate (a strict-ready gate would flakily skip tradeable
+// wallets). A pair whose placement throws is retried a few times, then skipped.
 import type { WalletVM } from "@farm/ui";
 import { placeOrderLive, closePositionLive, cancelLive, marketTouchLive } from "./liveContext";
 import { activeNetwork } from "./chainEnv";
@@ -63,6 +66,9 @@ const decimals = (tickStr: string): number => {
  *  capped. */
 const NO_TRADE_LIMIT = 3;
 
+/** Extra attempts for a pair whose placement throws (a transient relay blip) before it's skipped. */
+const PAIR_RETRIES = 2;
+
 /** Cumulative spend ceilings for a run (USDT0 notional): per-wallet bounds any single wallet's total,
  *  per-cohort bounds each side's total. From net.caps; Infinity when unbounded. */
 interface Caps { wallet: number; cohort: number }
@@ -87,6 +93,18 @@ function bumpCaps(state: CapState, makerId: string, takerId: string, notional: n
   state.perWallet.set(takerId, (state.perWallet.get(takerId) ?? 0) + notional);
   state.maker += notional;
   state.taker += notional;
+}
+
+/** The subset of wallets eligible to trade — those with collateral (readiness "funded" or "ready"). Nado
+ *  orders are gasless, so collateral is the real requirement; a wallet with none can't place. Logs each
+ *  ineligible wallet's reason once, at run start. */
+function eligible(wallets: readonly WalletVM[], role: string, hooks: RoundHooks): WalletVM[] {
+  const ok: WalletVM[] = [];
+  for (const w of wallets) {
+    if (w.readiness !== "unfunded") ok.push(w);
+    else hooks.log(`⊘ ${short(w)} (${role}) not eligible — no collateral.`);
+  }
+  return ok;
 }
 
 /** The self-cross price: a tick STRICTLY inside the spread. A post-only order there does not cross (the
@@ -142,11 +160,11 @@ async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: Rou
   const size = notional / px.priceNum;
   const makerSide = cfg.makerBuys ? "buy" : "sell";
   const takerSide = cfg.makerBuys ? "sell" : "buy";
-  const tag = `pair${i + 1}-${Date.now()}`; // per-pair jobId → idempotent submits (byte-identical on retry)
-  let makerPlaced = false;
+  const tag = `pair${i + 1}-${Date.now()}`; // jobId for placeOrderLive's own idempotent submit; a pair-level retry uses a fresh tag, and the finally cancels any maker a failed attempt left resting
+  let makerSubmitted = false;
   try {
+    makerSubmitted = true; // set BEFORE the await — a maker order that lands but whose call throws must still be cancelled
     await placeOrderLive(maker.id, cfg.market, { side: makerSide, size, price: px.price, jobId: `${tag}-m`, signal: hooks.signal });
-    makerPlaced = true;
     await placeOrderLive(taker.id, cfg.market, { side: takerSide, size, price: px.price, taker: true, jobId: `${tag}-t`, signal: hooks.signal });
     bumpCaps(state, maker.id, taker.id, notional); // count it only once both legs are in
     hooks.log(`✓ pair ${i + 1}: ${short(maker)} ${makerSide} ↔ ${short(taker)} ${takerSide} · ${notional.toFixed(0)} USDT0 @ ${px.price}`);
@@ -157,7 +175,7 @@ async function runPair([maker, taker]: [WalletVM, WalletVM], i: number, cfg: Rou
     // with NO signal: abort stops NEW work, never the cleanup of work already placed. The taker's IOC
     // never rests, so only the maker can leave a resting remainder — cancel it before the flatten reads
     // the position; then flatten both (reduce-only crossing IOC; a no-op when already flat).
-    if (makerPlaced) await cancelLive(maker.id, cfg.market).catch(() => {});
+    if (makerSubmitted) await cancelLive(maker.id, cfg.market).catch((e) => hooks.log(`⚠ cancel ${short(maker)} failed: ${(e as Error).message}`));
     await closePositionLive(maker.id, cfg.market).catch((e) => hooks.log(`⚠ flatten ${short(maker)} failed: ${(e as Error).message}`));
     await closePositionLive(taker.id, cfg.market).catch((e) => hooks.log(`⚠ flatten ${short(taker)} failed: ${(e as Error).message}`));
   }
@@ -189,15 +207,20 @@ export async function runRound(makers: readonly WalletVM[], takers: readonly Wal
     const pair = pairs[i]!;
     hooks.onPairStart?.(pair);
     const t0 = Date.now();
-    try {
-      const outcome = await runPair(pair, i, cfg, hooks, caps, state);
-      if (outcome === "traded") traded++; else skipped++;
-      hooks.onPairEnd?.(pair, outcome, Date.now() - t0);
-    } catch (e) {
-      errors++;
-      hooks.log(`✗ pair ${i + 1} failed: ${(e as Error).message}`);
-      hooks.onPairEnd?.(pair, "error", Date.now() - t0);
+    // Retry a pair whose placement throws (a transient blip) a few times before giving up on it.
+    let outcome: "traded" | "skipped" | undefined;
+    for (let attempt = 0; attempt <= PAIR_RETRIES; attempt++) {
+      try { outcome = await runPair(pair, i, cfg, hooks, caps, state); break; }
+      catch (e) {
+        if (hooks.signal?.aborted) break; // a pause, not a failure — the loop-top check ends the round
+        if (attempt < PAIR_RETRIES) { hooks.log(`↻ pair ${i + 1} retry ${attempt + 1}/${PAIR_RETRIES}: ${(e as Error).message}`); continue; }
+        errors++;
+        hooks.log(`✗ pair ${i + 1} failed: ${(e as Error).message}`);
+        break;
+      }
     }
+    if (outcome === "traded") traded++; else if (outcome === "skipped") skipped++;
+    hooks.onPairEnd?.(pair, outcome ?? "error", Date.now() - t0);
   }
   hooks.log(`round complete: ${traded}/${pairs.length} traded${skipped ? `, ${skipped} skipped` : ""}${errors ? `, ${errors} error(s)` : ""}`);
   return { pairs: pairs.length, traded, skipped, errors };
@@ -216,6 +239,15 @@ export async function runContinuous(makers: readonly WalletVM[], takers: readonl
   }
   const caps: Caps = { wallet: net.caps.walletUsdt0, cohort: net.caps.cohortUsdt0 };
   const state = freshCapState();
+  // Eligibility: only wallets with collateral trade (orders are gasless, so gas isn't required). Snapshot
+  // at run start — log each ineligible wallet once, then run the eligible subset.
+  const eMakers = eligible(makers, "maker", hooks);
+  const eTakers = eligible(takers, "taker", hooks);
+  if (eMakers.length === 0 || eTakers.length === 0) {
+    hooks.log("■ no eligible maker/taker pair — stopping.");
+    hooks.log("■ stopped.");
+    return;
+  }
   let round = 0;
   let noTrade = 0;
   while (!hooks.signal?.aborted) {
@@ -223,7 +255,7 @@ export async function runContinuous(makers: readonly WalletVM[], takers: readonl
     hooks.onRoundStart?.();
     const makerBuys = Math.random() < 0.5;
     hooks.log(`▶ round ${round} — makers ${makerBuys ? "buy" : "sell"}`);
-    const r = await runRound(makers, takers, { ...base, makerBuys }, hooks, caps, state);
+    const r = await runRound(eMakers, eTakers, { ...base, makerBuys }, hooks, caps, state);
     // Stop when the run can't make progress: an empty cohort, a cohort that hit its cumulative cap, or a
     // run of consecutive rounds that trade nothing (a tight market or every wallet capped) — a single
     // transient dead round is tolerated. A normal round keeps looping (the setTimeout(0) yields between).

@@ -7,7 +7,7 @@
 // Mocks mirror the automation specs (real in-tab crypto; mocked sequencer + RPC).
 // =============================================================================
 import { test, expect } from "@playwright/test";
-import { mockState, mockRelay, mockNativeRpc, MockSequencer, unlockGeneratedCohort, liveConfig } from "../_helpers/mock-live";
+import { mockState, mockRelay, mockNativeRpc, MockSequencer, unlockGeneratedCohort, liveConfig, FUNDED_COLLATERAL_X18, READY_GAS_WEI } from "../_helpers/mock-live";
 
 const MARKET = { id: "nado:perp:BTC-PERP", symbol: "BTC-PERP", kind: "perp", tickSize: "0.1", minSize: "0.001" };
 
@@ -15,8 +15,9 @@ test("automation-wallet-cap: the per-wallet cumulative cap stops the run", async
   const placed: string[] = [];
   await new MockSequencer().install(page);
   await mockState(page, liveConfig({ markets: [MARKET] }));
-  await mockRelay(page, { onExecute: (kind) => { if (kind === "place_order") placed.push(kind); } });
-  await mockNativeRpc(page);
+  // Wallets funded (collateral + gas) so they're eligible to trade toward the cap.
+  await mockRelay(page, { collateral: FUNDED_COLLATERAL_X18, onExecute: (kind) => { if (kind === "place_order") placed.push(kind); } });
+  await mockNativeRpc(page, { defaultWei: READY_GAS_WEI });
 
   await page.goto("/");
   await unlockGeneratedCohort(page); // 3 in-tab wallets, all un-cohorted
@@ -26,6 +27,8 @@ test("automation-wallet-cap: the per-wallet cumulative cap stops the run", async
   // Fixed $5/pair (under the $10 order cap) so the per-wallet accumulation is deterministic.
   await page.getByLabel("Min volume per pair").fill("5");
   await page.getByLabel("Max volume per pair").fill("5");
+  // Wait for the funding reconcile so the wallets are eligible at Run.
+  await expect(page.getByText(/^unfunded$/)).toHaveCount(0, { timeout: 30_000 });
   await page.getByRole("button", { name: "Run automation" }).click();
 
   // Round 2's pair is cap-skipped, the round trades nothing, and the loop self-stops.
