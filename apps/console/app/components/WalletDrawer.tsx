@@ -2,16 +2,17 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Badge, Banner, Button, ButtonGroup, Collapsible, Grid, InlineCopyText, Input, LayerCard, Loader, Select, Text, cn } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Collapsible, Grid, InlineCopyText, Input, LayerCard, Loader, Text, cn } from "@cloudflare/kumo";
 import { CheckCircleIcon, XCircleIcon, XIcon } from "@phosphor-icons/react";
 import type { WalletVM } from "@farm/ui";
-import type { PlaceOrderInput, Order, Position, OrderBook, Decimal, Market, Balance } from "@farm/adapter-api";
-import { MARKETS, placeOrder, cancelOrders } from "../lib/runtime";
-import { placeOrderLive, closePositionLive, depositLive, withdrawLive, refuelGasLive, mintUsdt0Live, readOrderBookLive, readBudget, depositAddressLive, TREASURY_WALLET_ID, DEFAULT_REFUEL_ETH } from "../lib/liveContext";
+import type { Order, Position, Market, Balance } from "@farm/adapter-api";
+import { MARKETS } from "../lib/runtime";
+import { depositLive, withdrawLive, refuelGasLive, mintUsdt0Live, depositAddressLive, TREASURY_WALLET_ID, DEFAULT_REFUEL_ETH } from "../lib/liveContext";
 import type { LiveEvent } from "../lib/liveStream";
 import { runInBrowserCustody } from "../lib/custodyLab";
 import type { CustodyLabResult } from "../lib/custodyLab";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { OrderTicket, useOrderTicket } from "./OrderTicket";
 import { AccountKindBadge } from "./AccountKindBadge";
 import { useNetwork } from "./NetworkProvider";
 import { QRCodeSVG } from "qrcode.react";
@@ -40,26 +41,15 @@ function Section({ title, children, className }: { title: ReactNode; children: R
 
 const em = (v: ReactNode) => <strong className="font-medium text-kumo-default">{v}</strong>;
 
-/** Levels per side the drawer reads AND renders — the ladder's row count is fixed to this. */
-const BOOK_DEPTH = 6;
-
-/** One side of the order-book ladder: always exactly BOOK_DEPTH rows (missing levels render as blank,
- *  aria-hidden rows) so the box never changes height as levels come and go. */
-function BookSide({ label, levels, tone }: { label: string; levels: OrderBook["bids"]; tone: string }) {
+/** The Order-book section frame: titled with the ticket's selected market (keeping the e2e's
+ *  "Order book · <market>" run) and wrapping the frameless <OrderTicket.Book/>. Rendered inside the
+ *  <OrderTicket> provider so it can read the selection. */
+function BookSection() {
+  const { market, mkt } = useOrderTicket();
   return (
-    <div className="flex flex-col gap-0.5">
-      <Text variant="secondary" size="xs">{label}</Text>
-      {Array.from({ length: BOOK_DEPTH }, (_, i) => {
-        const l = levels[i];
-        return l ? (
-          <div key={i} className="flex justify-between gap-2">
-            <span className={cn("min-w-0 truncate", tone)}>{l.price}</span><span className="shrink-0 text-kumo-subtle">{l.size}</span>
-          </div>
-        ) : (
-          <div key={i} aria-hidden>{"\u00a0"}</div>
-        );
-      })}
-    </div>
+    <Section title={`Order book · ${mkt(market)}`}>
+      <OrderTicket.Book />
+    </Section>
   );
 }
 
@@ -86,29 +76,16 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
     : [];
   const marketOptions = isLive && liveMarkets && liveMarkets.length ? liveMarkets : MARKETS;
   const { net } = useNetwork(); // the active network: gates the testnet-only faucet/mint UI + labels the copy
-  const [market, setMarket] = useState(MARKETS[0]!.id);
-  const [side, setSide] = useState<"buy" | "sell">("buy");
-  const [kind, setKind] = useState<"limit" | "market">("limit");
-  const [price, setPrice] = useState("63120");
-  const [size, setSize] = useState("0.1");
   const [amount, setAmount] = useState("100");
   const [gasAmount, setGasAmount] = useState(DEFAULT_REFUEL_ETH);
-  const [pending, setPending] = useState<null | "deposit" | "withdraw" | "taker" | "close" | "refuel" | "mint">(null);
+  const [pending, setPending] = useState<null | "deposit" | "withdraw" | "refuel" | "mint">(null);
   const [log, setLog] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [lab, setLab] = useState<CustodyLabResult | null>(null);
   const [labBusy, setLabBusy] = useState(false);
   const [labErr, setLabErr] = useState<string | null>(null);
-  const [book, setBook] = useState<OrderBook | null>(null);
   const [dda, setDda] = useState<string | null>(null); // this wallet's Nado direct-deposit address
   const [balancesOpen, setBalancesOpen] = useState(true); // the Balances list is collapsible
-
-  // Keep the selected market valid for the current option set (mock vs live).
-  useEffect(() => {
-    if (!marketOptions.some((m) => m.id === market)) {
-      setMarket((marketOptions.find((m) => m.id.endsWith("BTC-PERP")) ?? marketOptions[0]!).id);
-    }
-  }, [isLive, liveMarkets]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Escape closes the drawer (a Kumo overlay gets this for free; this hand-rolled <aside> must add it).
   // Skipped while a confirm is open — Escape belongs to that dialog then.
@@ -118,21 +95,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, pending, onClose]);
-
-  // Fetch the selected market's order book while a LIVE drawer is open, and refresh it on an interval
-  // (a book goes stale fast). A small debounce coalesces rapid market switches; the refresh yields
-  // when the shared read budget is low so it never starves cancels/kill-switch. On a failed read we
-  // KEEP the prior snapshot — the render below only shows it while its market matches the selection,
-  // so a stale snapshot for a previous market is never shown under the new market's header.
-  useEffect(() => {
-    if (!isLive || !open || !wallet) { setBook(null); return; }
-    let cancelled = false;
-    const walletId = wallet.id;
-    const load = () => readOrderBookLive(walletId, market, BOOK_DEPTH).then((b) => { if (!cancelled && b) setBook(b); }).catch(() => {});
-    const t = setTimeout(load, 120);
-    const iv = setInterval(() => { if (readBudget() > 1) void load(); }, 5_000);
-    return () => { cancelled = true; clearTimeout(t); clearInterval(iv); };
-  }, [isLive, open, market, wallet?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch this wallet's Nado direct-deposit address (DDA) while a LIVE drawer is open (keyless
   // indexer read via the server route). Re-fetches per wallet; aborts on close/switch.
@@ -146,39 +108,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
   }, [isLive, open, wallet?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const append = (m: string) => setLog((l) => [m, ...l].slice(0, 8));
-
-  const submit = async () => {
-    if (!wallet) return;
-    setBusy(true);
-    try {
-      const input: PlaceOrderInput = {
-        market, side, kind,
-        size: size as Decimal,
-        price: kind === "limit" ? (price as Decimal) : undefined,
-        postOnly: kind === "limit",
-        clientId: `c-${Date.now()}`,
-      };
-      const order: Order = await placeOrder(wallet, input);
-      append(`✓ ${side} ${size} ${market.split(":").pop()} → ${order.status} · role=${order.role} · ${String(order.venueId).slice(0, 12)}…`);
-    } catch (e) {
-      append(`✗ ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const doCancel = async () => {
-    if (!wallet) return;
-    setBusy(true);
-    try {
-      const r = await cancelOrders(wallet, { market });
-      append(`✓ cancelled ${r.cancelled.length} on ${market.split(":").pop()}`);
-    } catch (e) {
-      append(`✗ ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const doFund = async (action: "deposit" | "withdraw") => {
     if (!wallet) return;
@@ -244,40 +173,10 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
     }
   };
 
-  const doTaker = async () => {
-    if (!wallet) return;
-    setBusy(true);
-    try {
-      // Taker IOC signs IN-TAB → keyless relay (Stage 2a).
-      const order = await placeOrderLive(wallet.id, market, { side, size, taker: true });
-      append(`✓ taker ${side} ${market.split(":").pop()} (IOC) → ${order.status} · filled ${order.filled}/${order.size} · ${String(order.venueId).slice(0, 12)}…`);
-    } catch (e) {
-      append(`✗ ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const doClose = async () => {
-    if (!wallet) return;
-    setBusy(true);
-    try {
-      // Close = opposite crossing IOC, signed IN-TAB (Stage 2a).
-      const r = await closePositionLive(wallet.id, market);
-      append(`✓ close ${market.split(":").pop()} — position ${r.closed} ${r.closed ? "flattening (IOC)" : "(nothing open)"}`);
-    } catch (e) {
-      append(`✗ ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const runPending = (): void => {
     const p = pending;
     setPending(null);
     if (p === "deposit" || p === "withdraw") void doFund(p);
-    else if (p === "taker") void doTaker();
-    else if (p === "close") void doClose();
     else if (p === "refuel") void doRefuel();
     else if (p === "mint") void doMint();
   };
@@ -294,11 +193,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
     const na = Number(a.total) || 0, nb = Number(b.total) || 0;
     return (nb > 0 ? 1 : 0) - (na > 0 ? 1 : 0) || nb - na;
   });
-
-  // The book for the CURRENT market only (a kept snapshot of a previous market is never shown), and
-  // that book only when it has levels to draw — otherwise the fixed slot shows its loading/empty overlay.
-  const shownBook = book && book.market === market ? book : null;
-  const bookLevels = shownBook && (shownBook.bids.length > 0 || shownBook.asks.length > 0) ? shownBook : null;
 
   // Kumo has no drawer/sheet primitive, so the drawer stays a hand-rolled <aside> (the e2e locate it as
   // such) built from Kumo pieces: Kumo's own scrim (the recessed token at 80% opacity, exactly as Kumo's
@@ -401,66 +295,11 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                 </Section>
               )}
 
-              <Section title="Place order">
-                <Select
-                  label={`Market${isLive ? ` (live · ${marketOptions.length})` : ""}`}
-                  hideLabel={false}
-                  value={market}
-                  onValueChange={(v) => { if (v) setMarket(String(v)); }}
-                >
-                  {marketOptions.map((m) => (
-                    <Select.Option key={m.id} value={m.id}>{isLive ? m.id.split(":").pop() : `${m.base}-${m.quote}`} ({m.product})</Select.Option>
-                  ))}
-                </Select>
-                <div className="flex flex-wrap gap-2">
-                  <ButtonGroup aria-label="Side">
-                    {(["buy", "sell"] as const).map((s) => (
-                      <Button key={s} size="sm" variant={side === s ? "primary" : "secondary"} aria-pressed={side === s} className="capitalize" onClick={() => setSide(s)}>{s}</Button>
-                    ))}
-                  </ButtonGroup>
-                  <ButtonGroup aria-label="Order type">
-                    {(["limit", "market"] as const).map((k) => (
-                      <Button key={k} size="sm" variant={kind === k ? "primary" : "secondary"} aria-pressed={kind === k} className="capitalize" onClick={() => setKind(k)}>{k}</Button>
-                    ))}
-                  </ButtonGroup>
-                </div>
-                <Grid variant="side-by-side" gap="sm">
-                  {/* w-full min-w-0: fill the grid track instead of the input's intrinsic size=20 width. */}
-                  <Input label="Size" className="w-full min-w-0" value={size} onChange={(e) => setSize(e.target.value)} />
-                  {kind === "limit" && <Input label="Price" className="w-full min-w-0" value={price} onChange={(e) => setPrice(e.target.value)} />}
-                </Grid>
-                {isLive && <Text variant="secondary" size="xs">Live: your price is used (configurability-first) and must be within the oracle 80–120% band; size clamps to the market min. Leave price blank only for a book-derived fallback.</Text>}
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="primary" loading={busy} onClick={submit}>Sign &amp; submit</Button>
-                  <Button variant="secondary-destructive" onClick={doCancel} disabled={busy}>Cancel on market</Button>
-                  {isLive && <Button onClick={() => setPending("taker")} disabled={busy}>Taker (IOC)</Button>}
-                  {isLive && <Button variant="secondary-destructive" onClick={() => setPending("close")} disabled={busy}>Close position</Button>}
-                </div>
-              </Section>
-
-              {isLive && (
-                <Section title={`Order book · ${mkt(market)}`}>
-                  {/* A FIXED-HEIGHT slot, mounted as soon as the live drawer opens: the book lands ~200ms
-                      after open (debounce + metered relay read), and a section popping in here pushed the
-                      Funding / Gas-refuel controls below it down mid-click — a press that straddled the
-                      insert lost its click (the refuel-cap e2e flake). So the ladder always renders
-                      BOOK_DEPTH rows per side and a pending / stale-market / empty book overlays the same
-                      box: no book state ever changes this section's height. Bid/ask ladder (Kumo has no
-                      order-book primitive): token-coloured columns; each price sits alone in its element
-                      (the e2e matches a price exactly). */}
-                  <div className="relative">
-                    <Grid variant="side-by-side" gap="sm" className="font-mono" aria-hidden={!bookLevels || undefined}>
-                      <BookSide label="Bids" levels={bookLevels?.bids ?? []} tone="text-kumo-success" />
-                      <BookSide label="Asks" levels={bookLevels?.asks ?? []} tone="text-kumo-danger" />
-                    </Grid>
-                    {!bookLevels && (
-                      <div className="absolute inset-0 flex items-center justify-center gap-2 text-kumo-subtle">
-                        {shownBook ? "No resting liquidity on this market." : <><Loader size="sm" /> Loading the order book…</>}
-                      </div>
-                    )}
-                  </div>
-                </Section>
-              )}
+              <OrderTicket wallet={wallet} isLive={isLive} marketOptions={marketOptions} onActivity={append}>
+                <Section title="Order entry"><OrderTicket.Entry /></Section>
+                {isLive && <BookSection />}
+                <Section title="Actions"><OrderTicket.Actions /></Section>
+              </OrderTicket>
 
               {isLive && (
                 <Section title="Funding (USDT0 collateral)">
@@ -570,18 +409,14 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
         title={
           pending === "deposit" ? "Deposit collateral (on-chain)"
             : pending === "withdraw" ? "Withdraw collateral"
-            : pending === "taker" ? "Taker order (IOC cross)"
             : pending === "refuel" ? "Refuel gas (native ETH transfer)"
-            : pending === "mint" ? "Mint USDT0 (testnet faucet)"
-            : "Close position"
+            : "Mint USDT0 (testnet faucet)"
         }
         body={<>
           {pending === "deposit" && <>Approve + deposit {em(amount)} USDT0 on-chain to the Nado Endpoint — a real {net.networkName} transaction (gas), built and signed in this tab.</>}
           {pending === "withdraw" && <>Withdraw {em(amount)} USDT0 collateral via a Nado EIP-712 signed in this tab, relayed to the sequencer.</>}
-          {pending === "taker" && <>Fire a {em(side)} {em("IOC crossing")} order on {market.split(":").pop()} — fills resting liquidity and cancels the rest, opening a position.</>}
           {pending === "refuel" && <>Send {em(`${gasAmount} ETH`)} from the treasury ({em(TREASURY_WALLET_ID)}) to this wallet ({em(`#${wallet?.index}`)}) — a real {net.networkName} native transfer (irreversible), signed by the treasury&apos;s sealed key in this tab.</>}
           {pending === "mint" && <>Mint {em(`${amount} USDT0`)} to this wallet ({em(`#${wallet?.index}`)}) from the treasury ({em(TREASURY_WALLET_ID)}) — a real {em("testnet")} faucet mint (gas), signed by the treasury&apos;s sealed key in this tab. Mainnet USDT0 is bridged, not minted.</>}
-          {pending === "close" && <>Flatten the open position on {market.split(":").pop()} with an opposite {em("IOC")} order.</>}
         </>}
         danger={<>Real {net.networkName} order / funds move. Everything signs in this tab — the key never leaves your browser.</>}
         onConfirm={runPending}
