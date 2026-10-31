@@ -109,6 +109,7 @@ export default function Page() {
 
   const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(() => new Set());
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
+  const [selectedCohorts, setSelectedCohorts] = useState<Set<"maker" | "taker">>(new Set());
   const [drawerWallet, setDrawerWallet] = useState<WalletVM | null>(null);
   const [accountingOpen, setAccountingOpen] = useState(false);
 
@@ -172,13 +173,16 @@ export default function Page() {
     });
   }, [accountKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const shown = useMemo(
-    () => filterWallets(fleet.wallets, [...selectedAccounts], [...selectedTags]),
-    [fleet, selectedAccounts, selectedTags],
-  );
+  const shown = useMemo(() => {
+    const byTag = filterWallets(fleet.wallets, [...selectedAccounts], [...selectedTags]);
+    return selectedCohorts.size > 0 ? byTag.filter((w) => w.cohort && selectedCohorts.has(w.cohort)) : byTag;
+  }, [fleet, selectedAccounts, selectedTags, selectedCohorts]);
 
   const toggleTag = (t: string) =>
     setSelectedTags((s) => { const n = new Set(s); if (n.has(t)) n.delete(t); else n.add(t); return n; });
+
+  const toggleCohort = (c: "maker" | "taker") =>
+    setSelectedCohorts((s) => { const n = new Set(s); if (n.has(c)) n.delete(c); else n.add(c); return n; });
 
   // Kumo Sidebar.Provider is the app shell: collapsible="none" keeps the left rail frozen (a fixed
   // <aside>, never a mobile sheet); only <main> scrolls. Width: Kumo honours `defaultWidth` only when
@@ -200,6 +204,8 @@ export default function Page() {
         tags={fleet.tags}
         selectedTags={selectedTags}
         onToggleTag={toggleTag}
+        selectedCohorts={selectedCohorts}
+        onToggleCohort={toggleCohort}
         liveEnabled={live.enabled}
         liveWallets={liveWallets}
         onFunded={(ids) => {
@@ -282,6 +288,7 @@ export default function Page() {
               .catch(() => {});
           }
         }}
+        onWalletChanged={refreshLive}
       />
       <AccountingView open={accountingOpen} records={bulk.activity} onClose={() => setAccountingOpen(false)} />
     </KumoSidebar.Provider>

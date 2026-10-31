@@ -19,6 +19,8 @@ interface Props {
   tags: string[];
   selectedTags: Set<string>;
   onToggleTag: (t: string) => void;
+  selectedCohorts: Set<"maker" | "taker">;
+  onToggleCohort: (c: "maker" | "taker") => void;
   liveEnabled?: boolean;
   liveWallets?: WalletVM[];                       // live VMs (with readiness) for the Fund-cohort panel
   onFunded?: (walletIds: string[]) => void;       // repaint after a bulk fund
@@ -69,6 +71,20 @@ export function Sidebar(props: Props) {
                 return (
                   <Button key={t} size="xs" variant={on ? "primary" : "secondary"} aria-pressed={on} onClick={() => props.onToggleTag(t)}>
                     {t}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <Label>Cohort</Label>
+            <div className="flex flex-wrap gap-1">
+              {(["maker", "taker"] as const).map((c) => {
+                const on = props.selectedCohorts.has(c);
+                return (
+                  <Button key={c} size="xs" variant={on ? "primary" : "secondary"} aria-pressed={on} className="capitalize" onClick={() => props.onToggleCohort(c)}>
+                    {c}
                   </Button>
                 );
               })}

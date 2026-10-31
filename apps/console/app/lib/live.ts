@@ -12,9 +12,9 @@ import type { Address, Order, Balance, Position, Market, Decimal } from "@farm/a
 import { getLiveConfig } from "./liveConfig";
 import type { LiveProductVM } from "./liveConfig";
 import { cohortWallets, listAccounts } from "./custody";
+import type { Cohort } from "./custody";
 import { readWalletLive } from "./liveContext";
 
-export const LIVE_COHORT = "LIVE";
 export type { LiveProductVM };
 
 // Each live wallet carries its OWNING account identity (slug/name/kind), so the home page groups
@@ -22,6 +22,7 @@ export type { LiveProductVM };
 export interface LiveWallet {
   walletId: string; address: string; subaccount?: string;
   accountSlug: string; accountName: string; accountKind: AccountKind;
+  tags: string[]; cohort?: Cohort;   // freeform labels + maker/taker role (from the in-tab vault)
   openOrders?: Order[]; balances?: Balance[]; positions?: Position[]; native?: Decimal;
 }
 
@@ -61,6 +62,7 @@ export async function fetchLiveState(): Promise<LiveState> {
   const wallets: LiveWallet[] = coh.map((c) => ({
     walletId: c.walletId, address: c.address, subaccount: c.subaccountHex,
     accountSlug: c.accountSlug, accountName: c.accountName, accountKind: c.accountKind,
+    tags: c.tags, cohort: c.cohort,
   }));
   // The real vault accounts drive the home sidebar's Account filter (one entry per account).
   const accounts: AccountVM[] = listAccounts().map((a) => ({ id: a.slug, name: a.name, kind: a.kind, walletCount: a.walletCount }));
@@ -107,7 +109,7 @@ export function liveWalletVMs(state: LiveState): WalletVM[] {
     });
     return {
       id: w.walletId, accountId: w.accountSlug, accountName: w.accountName, accountKind: w.accountKind,
-      index: i, address, tags: [LIVE_COHORT],
+      index: i, address, tags: w.tags, cohort: w.cohort,
       nativeBalance: w.native ?? "—", quoteBalance: quote?.total ?? "—",
       status: "active", readiness, openOrders: w.openOrders?.length ?? 0,
     };

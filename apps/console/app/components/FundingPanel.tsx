@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { Banner, Button, Input, LayerCard, Text, cn } from "@cloudflare/kumo";
 import { CheckCircleIcon, StopIcon, XCircleIcon } from "@phosphor-icons/react";
 import type { WalletVM } from "@farm/ui";
-import { LIVE_COHORT } from "../lib/live";
+import { isLiveWallet } from "../lib/live";
 import { fundCohortLive, DEFAULT_REFUEL_ETH, DEFAULT_MINT_USDT0, DEFAULT_DEPOSIT_USDT0, TREASURY_WALLET_ID } from "../lib/liveContext";
 import type { FundProgress } from "../lib/liveContext";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -20,7 +20,7 @@ export function FundingPanel({ wallets, onFunded }: { wallets: WalletVM[]; onFun
   // the readiness gate lags on-chain confirmation (the sequencer indexes collateral after the tx mines),
   // so without this a re-run during that window would re-target + double-deposit a just-funded wallet.
   const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
-  const targets = wallets.filter((w) => w.tags.includes(LIVE_COHORT) && w.readiness === "unfunded" && w.id !== TREASURY_WALLET_ID && !doneIds.has(w.id));
+  const targets = wallets.filter((w) => isLiveWallet(w) && w.readiness === "unfunded" && w.id !== TREASURY_WALLET_ID && !doneIds.has(w.id));
   const [gasEach, setGasEach] = useState(DEFAULT_REFUEL_ETH);
   const [mintEach, setMintEach] = useState(DEFAULT_MINT_USDT0);
   const [depositEach, setDepositEach] = useState(DEFAULT_DEPOSIT_USDT0);

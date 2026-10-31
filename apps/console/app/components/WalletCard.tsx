@@ -38,7 +38,10 @@ export const WalletCard = memo(function WalletCard({ wallet, selected, onSelect 
     >
       <div className="flex items-center justify-between gap-2">
         <AccountKindBadge kind={wallet.accountKind}>{wallet.accountName}</AccountKindBadge>
-        <Badge variant={statusVariant}>{statusLabel}</Badge>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {wallet.cohort && <Badge variant="secondary" className="capitalize">{wallet.cohort}</Badge>}
+          <Badge variant={statusVariant}>{statusLabel}</Badge>
+        </div>
       </div>
       <div className="font-mono text-sm text-kumo-subtle">#{wallet.index} · {short(wallet.address.value)}</div>
       <div className="mt-auto flex items-end justify-between">

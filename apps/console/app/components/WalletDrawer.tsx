@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Badge, Button, Collapsible, Grid, InlineCopyText, Input, LayerCard, Loader, Text, cn } from "@cloudflare/kumo";
+import { Button, ButtonGroup, Collapsible, Grid, InlineCopyText, Input, LayerCard, Loader, Text, cn } from "@cloudflare/kumo";
 import { XIcon } from "@phosphor-icons/react";
 import type { WalletVM } from "@farm/ui";
 import type { Order, Position, Market, Balance } from "@farm/adapter-api";
@@ -11,6 +11,7 @@ import { depositLive, withdrawLive, refuelGasLive, mintUsdt0Live, depositAddress
 import type { LiveEvent } from "../lib/liveStream";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { OrderTicket, useOrderTicket } from "./OrderTicket";
+import { addWalletTag, removeWalletTag, setWalletCohort } from "../lib/custody";
 import { AccountKindBadge } from "./AccountKindBadge";
 import { useNetwork } from "./NetworkProvider";
 import { QRCodeSVG } from "qrcode.react";
@@ -51,7 +52,67 @@ function BookSection() {
   );
 }
 
-export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, liveMarkets, openOrders, positions, balances, subaccount, onRefueled }: {
+/** The per-wallet tag chips (replacing the old "Live" badge): each freeform tag is a removable chip and
+ *  the trailing (+) chip opens an inline input to add one. Tags persist via wative Wallet tags; after a
+ *  change we ask the host to repaint the fleet (onChanged → refreshLive). */
+function WalletTagEditor({ walletId, tags, onChanged }: { walletId: string; tags: string[]; onChanged?: () => void }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try { await fn(); onChanged?.(); } catch { /* leave the chips as-is on failure */ } finally { setBusy(false); }
+  };
+  const commit = async () => {
+    const t = draft.trim();
+    setAdding(false); setDraft("");
+    if (t) await run(() => addWalletTag(walletId, t));
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {tags.map((t) => (
+        <Button key={t} size="xs" variant="secondary" disabled={busy} aria-label={`Remove tag ${t}`} onClick={() => void run(() => removeWalletTag(walletId, t))}>{t} ✕</Button>
+      ))}
+      {adding ? (
+        <Input
+          size="sm"
+          aria-label="New tag"
+          placeholder="tag"
+          autoFocus
+          className="h-6 w-24"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") void commit(); else if (e.key === "Escape") { setAdding(false); setDraft(""); } }}
+          onBlur={() => void commit()}
+        />
+      ) : (
+        <Button size="xs" variant="secondary" disabled={busy} aria-label="Add tag" onClick={() => setAdding(true)}>+</Button>
+      )}
+    </div>
+  );
+}
+
+/** The maker/taker cohort switch — a wallet's self-cross role, switchable manually here (persisted via a
+ *  reserved wative tag). Unset until chosen. */
+function CohortSwitch({ walletId, cohort, onChanged }: { walletId: string; cohort?: "maker" | "taker"; onChanged?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const set = async (c: "maker" | "taker") => {
+    setBusy(true);
+    try { await setWalletCohort(walletId, c); onChanged?.(); } catch { /* keep the current role on failure */ } finally { setBusy(false); }
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <Text variant="secondary" size="xs" as="span">Cohort</Text>
+      <ButtonGroup aria-label="Cohort">
+        {(["maker", "taker"] as const).map((c) => (
+          <Button key={c} size="xs" variant={cohort === c ? "primary" : "secondary"} aria-pressed={cohort === c} disabled={busy} className="capitalize" onClick={() => void set(c)}>{c}</Button>
+        ))}
+      </ButtonGroup>
+    </div>
+  );
+}
+
+export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, liveMarkets, openOrders, positions, balances, subaccount, onRefueled, onWalletChanged }: {
   wallet: WalletVM | null;
   onClose: () => void;
   isLive?: boolean;
@@ -62,6 +123,7 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
   balances?: Balance[];      // the reconciled per-asset balance LIST for this wallet
   subaccount?: string;       // this wallet's subaccount hex — filters the live feed to THIS wallet
   onRefueled?: (walletIds: string[]) => void; // after a successful gas refuel → repaint these wallets' balances
+  onWalletChanged?: () => void;               // repaint the fleet after a per-wallet tag/cohort edit (→ refreshLive)
 }) {
   const open = wallet !== null;
   const isTreasury = wallet?.id === TREASURY_WALLET_ID; // the gas source — it funds others, not itself
@@ -202,7 +264,7 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
               <div className="flex min-w-0 flex-col gap-1.5">
                 <div className="flex flex-wrap items-center gap-1.5">
                   <AccountKindBadge kind={wallet.accountKind}>{wallet.accountName}</AccountKindBadge>
-                  {isLive && <Badge variant="primary" className="bg-kumo-brand text-kumo-inverse">Live</Badge>}
+                  {isLive && <WalletTagEditor walletId={wallet.id} tags={wallet.tags} onChanged={onWalletChanged} />}
                 </div>
                 <div className="flex items-start gap-1.5">
                   <Text variant="mono-secondary" as="span">#{wallet.index}</Text>
@@ -211,6 +273,7 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                     {wallet.address.value}
                   </InlineCopyText>
                 </div>
+                {isLive && <CohortSwitch walletId={wallet.id} cohort={wallet.cohort} onChanged={onWalletChanged} />}
               </div>
               <Button variant="ghost" shape="square" size="sm" icon={XIcon} aria-label="Close" onClick={onClose} />
             </div>
@@ -373,9 +436,6 @@ export function WalletDrawer({ wallet, onClose, isLive = false, liveEvents, live
                 </LayerCard>
               )}
 
-              <div className="mt-auto flex shrink-0 flex-wrap gap-1">
-                {wallet.tags.map((c) => <Badge key={c} variant="secondary">{c}</Badge>)}
-              </div>
             </div>
           </>
         )}
