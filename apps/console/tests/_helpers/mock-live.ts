@@ -297,19 +297,26 @@ export async function passGate(page: Page, password = "test-pw-123"): Promise<vo
   await page.getByPlaceholder("vault password", { exact: true }).fill(password);
   await page.getByPlaceholder("confirm vault password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Create vault" }).click();
-  // The gate unmounts and the app (which hosts the custody panel) renders.
-  await page.getByText(/In-browser custody/i).waitFor({ timeout: 30_000 });
+  // The gate unmounts and the home app shell renders — wait on the Accounts nav link (the in-sidebar
+  // custody panel that used to signal this is gone; the cohort is created on the Accounts page now).
+  await page.getByRole("link", { name: "Accounts" }).waitFor({ timeout: 30_000 });
 }
 
-/** Drive the already-open CustodyPanel to generate a fresh N-wallet in-tab cohort (real wative-core
- *  browser crypto + IndexedDB — the shipped Stage 2b path), then wait until it is unlocked. The vault
- *  must already be open (call passGate first); split from passGate so a test can assert the app's
- *  "locked" state between the two. */
+/** Create a fresh in-tab cohort via the Accounts page (real wative-core browser crypto + IndexedDB —
+ *  the shipped path now that the in-sidebar custody panel is gone): one "fleet" HD account with 3
+ *  wallets, the same live:0..2 cohort the old "Generate 3 in-tab" produced. The vault must already be
+ *  open (call passGate first); split from passGate so a test can assert the "locked" state between the
+ *  two. Navigates to /accounts and back, returning on the home fleet with the wallets rendered. */
 export async function generateCohortViaPanel(page: Page, password = "test-pw-123"): Promise<void> {
-  await page.getByPlaceholder("workspace password").fill(password);
-  await page.getByRole("button", { name: /Generate \d+ in-tab/ }).click();
-  // The panel header flips to "unlocked" and lists the generated wallets.
-  await page.getByText(/In-browser custody · unlocked/i).waitFor({ timeout: 30_000 });
+  await page.getByRole("link", { name: "Accounts" }).click();
+  await page.getByPlaceholder("e.g. market-makers").fill("fleet");
+  await page.getByPlaceholder("vault password").fill(password);
+  await page.getByLabel("Wallets to derive").fill("3");
+  await page.getByRole("button", { name: "Create account" }).click();
+  await page.getByTestId("account-block").filter({ hasText: "fleet" }).waitFor({ timeout: 30_000 });
+  // Back to the home fleet; the 3 unlocked wallets render.
+  await page.getByRole("link", { name: "Wallets", exact: true }).click();
+  await page.getByTestId("wallet-card").first().waitFor({ timeout: 30_000 });
 }
 
 /** Pass the entry gate, then generate a fresh in-tab cohort. The gate password and the custody

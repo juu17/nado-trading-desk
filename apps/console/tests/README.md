@@ -26,8 +26,8 @@ dev server already on `:18270` (and self-starts one otherwise).
 
 ## How it stays deterministic & offline
 
-- **Real in-tab custody**: each Flow unlocks a fresh `N=3` cohort through the real `CustodyPanel`
-  UI (`Generate … in-tab` → wative-core browser crypto + IndexedDB). No test seam is added to the
+- **Real in-tab custody**: each Flow unlocks a fresh `N=3` cohort through the real `/accounts` create
+  form (an HD account with 3 wallets → wative-core browser crypto + IndexedDB). No test seam is added to the
   key-handling code. Launch-mode ephemeral contexts isolate the `nado-ika-custody` IndexedDB per
   test, so `generate` always starts clean.
 - **Pure-mock sequencer** (no real testnet, no funded cohort): `tests/_helpers/mock-live.ts`

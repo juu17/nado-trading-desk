@@ -194,18 +194,13 @@ export default function Page() {
         workspaceName={live.enabled ? net.networkName : "offline"}
         totalWallets={fleet.wallets.length}
         shownWallets={shown.length}
-        shown={shown}
         accountOptions={options}
         selectedAccounts={selectedAccounts}
         onAccountsChange={setSelectedAccounts}
         cohorts={fleet.cohorts}
         selectedCohorts={selectedCohorts}
         onToggleCohort={toggleCohort}
-        liveMarkets={live.markets}
         liveEnabled={live.enabled}
-        liveDefaultProduct={live.defaultProduct}
-        liveCohortSize={live.wallets?.length || 3}
-        onLiveCohortChange={refreshLive}
         liveWallets={liveWallets}
         onFunded={(ids) => {
           // After a bulk fund, repaint each attempted wallet + the treasury (native gas, collateral,

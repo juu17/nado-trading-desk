@@ -1,32 +1,25 @@
 "use client";
 
 import { Button, Meter, Sidebar as KumoSidebar, Text } from "@cloudflare/kumo";
+import { LockIcon } from "@phosphor-icons/react";
 import type { AccountOption, WalletVM } from "@farm/ui";
-import type { Market } from "@farm/adapter-api";
 import { AccountFilter } from "./AccountFilter";
-import { BulkPanel } from "./BulkPanel";
-import { CustodyPanel } from "./CustodyPanel";
 import { FundingPanel } from "./FundingPanel";
-import type { InTabProduct } from "../lib/liveClient";
 import { NetworkSwitch } from "./NetworkSwitch";
 import { useNetwork } from "./NetworkProvider";
+import { useVault } from "./AppGate";
 
 interface Props {
   workspaceName: string;
   totalWallets: number;
   shownWallets: number;
-  shown: WalletVM[];
   accountOptions: AccountOption[];
   selectedAccounts: Set<string>;
   onAccountsChange: (next: Set<string>) => void;
   cohorts: string[];
   selectedCohorts: Set<string>;
   onToggleCohort: (c: string) => void;
-  liveMarkets?: Market[];
   liveEnabled?: boolean;
-  liveDefaultProduct?: InTabProduct;
-  liveCohortSize?: number;
-  onLiveCohortChange?: () => void;
   liveWallets?: WalletVM[];                       // live VMs (with readiness) for the Fund-cohort panel
   onFunded?: (walletIds: string[]) => void;       // repaint after a bulk fund
 }
@@ -41,6 +34,7 @@ const Label = ({ children }: { children: React.ReactNode }) => (
  *  as the scroll area for the workspace summary, network, account filter, cohort tags and tool panels. */
 export function Sidebar(props: Props) {
   const { net } = useNetwork();
+  const { relock } = useVault(); // lock the vault from home (the custody panel used to host this)
   return (
     <KumoSidebar>
       <KumoSidebar.Header>
@@ -81,10 +75,6 @@ export function Sidebar(props: Props) {
             </div>
           </div>
 
-          <BulkPanel wallets={props.shown} liveMarkets={props.liveMarkets} />
-
-          {props.liveEnabled && <CustodyPanel cohortSize={props.liveCohortSize} product={props.liveDefaultProduct} onCohortChange={props.onLiveCohortChange} isTestnet={net.isTestnet} />}
-
           {/* Fund cohort is a TESTNET-only bulk on-ramp (its mint step can't run on mainnet, where
               USDT0 is bridged) — hide it entirely on mainnet so it never burns real gas. */}
           {props.liveEnabled && net.isTestnet && props.liveWallets && props.liveWallets.length > 0 && <FundingPanel wallets={props.liveWallets} onFunded={props.onFunded} />}
@@ -94,6 +84,8 @@ export function Sidebar(props: Props) {
               ? `Live ${net.networkName} enabled · live-cohort fires sign + submit to the real sequencer; mock wallets stay offline`
               : "Offline mock · no testnet · actions run the real adapter + plan runner"}
           </Text>
+
+          <Button variant="secondary" size="sm" icon={LockIcon} onClick={relock} className="self-start">Lock vault</Button>
         </div>
       </KumoSidebar.Content>
     </KumoSidebar>

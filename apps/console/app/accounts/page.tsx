@@ -9,6 +9,7 @@ import {
 import type { AccountVM, AccountKind } from "../lib/custody";
 import { QrKeyScanner } from "../components/QrKeyScanner";
 import { useVault } from "../components/AppGate";
+import { useNetwork } from "../components/NetworkProvider";
 
 const splitKeys = (s: string): string[] => s.split(/[\s,]+/).map((k) => k.trim()).filter(Boolean);
 
@@ -65,6 +66,7 @@ export default function AccountsPage() {
 
 /** ONE form, all fields visible (no wizard): pick HD or PK, then fill the kind's fields. */
 function CreateAccountForm({ onCreated }: { onCreated: (accounts: AccountVM[]) => void }) {
+  const { net } = useNetwork(); // the active network: the funded-dev-seed import is testnet-only
   const [kind, setKind] = useState<AccountKind>("HD");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -85,6 +87,23 @@ function CreateAccountForm({ onCreated }: { onCreated: (accounts: AccountVM[]) =
         : await createPkAccount(name.trim(), password, splitKeys(privKeys));
       onCreated(accounts);
       setMsg(`✓ created ${kind} account “${name.trim()}”`);
+      setName(""); setPassword(""); setMnemonic(""); setPrivKeys(""); setCount(1);
+    } catch (e) { setMsg(`✗ ${(e as Error).message}`); }
+    finally { setBusy(false); }
+  };
+
+  // TESTNET dev convenience (ported from the retired sidebar custody panel): pull the funded disposable
+  // seed from the localhost-only /api/nado/dev-seed bridge and import it as an HD account, so the in-tab
+  // cohort is the already-funded one for verification. The mnemonic is consumed straight into custody —
+  // never rendered, never kept in component state. Needs the vault password; the account name is optional.
+  const importFundedDevSeed = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch("/api/nado/dev-seed", { cache: "no-store" }).then((x) => x.json()) as { mnemonic?: string; error?: string };
+      if (r.error || !r.mnemonic) throw new Error(r.error ?? "no seed returned");
+      const label = name.trim() || "funded-dev";
+      onCreated(await createHdAccount(label, password, r.mnemonic, Math.max(1, count)));
+      setMsg(`✓ imported funded dev seed → account “${label}”`);
       setName(""); setPassword(""); setMnemonic(""); setPrivKeys(""); setCount(1);
     } catch (e) { setMsg(`✗ ${(e as Error).message}`); }
     finally { setBusy(false); }
@@ -128,6 +147,12 @@ function CreateAccountForm({ onCreated }: { onCreated: (accounts: AccountVM[]) =
               value={count}
               onChange={(e) => setCount(Math.max(1, Number(e.target.value) || 1))}
             />
+            {net.isTestnet && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="ghost" icon={DownloadSimpleIcon} loading={busy} disabled={busy || !password} onClick={importFundedDevSeed}>Import funded dev seed</Button>
+                <Text variant="secondary" size="xs">Testnet: imports the funded disposable seed from the localhost dev bridge (needs the vault password).</Text>
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex flex-col gap-2">
