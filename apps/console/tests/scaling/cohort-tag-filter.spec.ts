@@ -40,6 +40,9 @@ test("tag-and-cohort-flow: assign a tag + a maker cohort in the drawer, then fil
 
   await drawer.getByRole("button", { name: "Close", exact: true }).click(); // exact: avoid "Close position"
 
+  // The active-wallet strip is split by cohort: the Maker row now counts the wallet we assigned.
+  await expect(page.getByText("Maker · 1")).toBeVisible();
+
   // The sidebar now carries the new tag; its toggle filters the fleet to the one tagged wallet.
   const tagToggle = page.getByRole("button", { name: "mm-a", exact: true });
   await expect(tagToggle).toBeVisible();
