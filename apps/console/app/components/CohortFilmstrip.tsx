@@ -25,6 +25,10 @@ function FilmRow({ label, wallets, selectedId, onSelect }: {
               variant={sel ? "primary" : "secondary"}
               aria-pressed={sel}
               onClick={() => onSelect(w)}
+              // The secondary variant's ring is kumo-line (near-black @10% alpha) — too faint to read as
+              // a border on a chip. Give unselected chips a clearly-visible neutral ring; the selected
+              // chip keeps its primary brand ring.
+              className={sel ? undefined : "ring-kumo-contrast/30"}
               icon={<span aria-hidden className="size-1.5 rounded-full bg-kumo-success" />}
             >
               <span className="font-mono">{w.address.value.slice(0, 6)}…</span>
